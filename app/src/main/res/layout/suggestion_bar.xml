@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.finsky.layout.SuggestionBarLayout android:background="@drawable/highlight_overlay" android:layout_width="match_parent" android:layout_height="@dimen/play_cluster_header_height"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <TextView android:textSize="@dimen/content_generic_large_size" android:textColor="@color/play_primary_text" android:id="@id/suggestion_line_full" android:paddingLeft="8.0dp" android:paddingRight="12.0dp" android:layout_width="wrap_content" android:layout_height="wrap_content" android:singleLine="true" />
+    <TextView android:textSize="@dimen/content_generic_large_size" android:textColor="@color/play_primary_text" android:id="@id/suggestion_line1" android:paddingLeft="8.0dp" android:paddingRight="12.0dp" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/suggestion_question" android:singleLine="true" />
+    <TextView android:textSize="@dimen/content_generic_large_size" android:textStyle="italic" android:textColor="@color/play_primary_text" android:ellipsize="marquee" android:id="@id/suggestion_line2" android:paddingLeft="8.0dp" android:paddingRight="8.0dp" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="-4.0dp" android:singleLine="true" />
+    <ImageView android:id="@id/suggestion_arrow" android:paddingLeft="5.0dp" android:paddingRight="8.0dp" android:layout_width="wrap_content" android:layout_height="match_parent" android:src="@drawable/ic_more_arrow_right" />
+    <View android:id="@id/suggestion_underline" android:background="@color/multi_primary" android:layout_width="match_parent" android:layout_height="2.0dp" />
+</com.google.android.finsky.layout.SuggestionBarLayout>

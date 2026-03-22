@@ -1,0 +1,14 @@
+{
+    "name":  "play-google-api",
+    "version":  "1.0.0",
+    "private":  true,
+    "type":  "module",
+    "scripts":  {
+                    "dev":  "bun --watch src/server.ts",
+                    "start":  "bun src/server.ts",
+                    "download:archive-icons":  "bun scripts/download-archive-icons.mjs"
+                },
+    "devDependencies":  {
+                            "@types/bun":  "latest"
+                        }
+}

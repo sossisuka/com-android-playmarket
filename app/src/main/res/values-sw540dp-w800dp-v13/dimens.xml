@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="bucket_entry_height">125.0dp</dimen>
+    <dimen name="large_badge_height">26.0dp</dimen>
+    <dimen name="badge_container_icon_size">18.0dp</dimen>
+    <dimen name="details_download_padding_bottom">0.0dp</dimen>
+    <dimen name="action_bar_height">56.0dp</dimen>
+    <dimen name="setup_wizard_button_min_width">208.0dp</dimen>
+    <dimen name="wide_graphic_max_height">240.0dp</dimen>
+    <dimen name="details_right_column_margin">20.0dp</dimen>
+    <dimen name="left_column_width">312.0dp</dimen>
+    <dimen name="play_banner_large_size">38.0sp</dimen>
+    <dimen name="play_banner_medium_size">21.0sp</dimen>
+</resources>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout android:layout_width="match_parent" android:layout_height="match_parent"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <include layout="@layout/rec_widget_corpus_strip" />
+    <TextView android:textSize="@dimen/widget_secondary_font_size" android:id="@id/widget_reason" android:paddingLeft="4.0dp" android:paddingRight="4.0dp" android:paddingBottom="2.0dp" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_alignParentBottom="true" />
+    <ImageView android:id="@id/widget_promo" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop" android:layout_above="@id/widget_reason" android:layout_below="@id/widget_strip" />
+    <include layout="@layout/rec_widget_overlay" />
+    <include android:id="@id/widget_content_accessibility" layout="@layout/widget_accessibility_overlay" />
+    <include layout="@layout/rec_widget_dismiss" />
+    <include layout="@layout/rec_widget_refresh" />
+</RelativeLayout>

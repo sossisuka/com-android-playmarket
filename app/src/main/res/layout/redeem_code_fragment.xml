@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout android:layout_width="match_parent" android:layout_height="0.0dp" android:layout_weight="1.0"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <LinearLayout android:orientation="vertical" android:id="@id/redeem_screen" android:layout_width="match_parent" android:layout_height="match_parent">
+        <LinearLayout android:orientation="horizontal" android:paddingLeft="16.0dp" android:paddingTop="12.0dp" android:paddingRight="16.0dp" android:layout_width="match_parent" android:layout_height="wrap_content">
+            <com.google.android.play.layout.PlayTextView android:ellipsize="end" android:id="@id/current_play_balance_label" android:layout_width="0.0dp" android:layout_height="wrap_content" android:text="@string/balance_label" android:singleLine="true" android:layout_weight="1.0" style="@style/LightPurchase_TitleText" />
+            <ProgressBar android:layout_gravity="center_vertical" android:id="@id/progress_bar" android:visibility="invisible" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginLeft="8.0dp" android:indeterminate="true" style="@style/FinskyProgressSmallInverse" />
+            <TextView android:id="@id/balance" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginLeft="8.0dp" style="@style/LightPurchase_Price" />
+        </LinearLayout>
+        <TextView android:id="@id/account" android:paddingLeft="16.0dp" android:paddingRight="16.0dp" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="-2.0dp" style="@style/LightPurchase_AccountName" />
+        <ScrollView android:paddingLeft="16.0dp" android:paddingRight="16.0dp" android:fadingEdge="none" android:layout_width="match_parent" android:layout_height="0.0dp" android:fillViewport="true" android:layout_weight="1.0">
+            <LinearLayout android:orientation="vertical" android:paddingTop="10.0dp" android:layout_width="match_parent" android:layout_height="wrap_content">
+                <EditText android:id="@id/pin_entry" android:hint="@string/gift_card_code_hint" android:lines="1" android:maxLength="30" android:inputType="textCapCharacters|textNoSuggestions" android:imeOptions="flagNoExtractUi" android:textCursorDrawable="@null" style="@style/RedeemCodeEditText" />
+                <TextView android:textSize="@dimen/content_generic_small_size" android:id="@id/user_message" android:focusable="false" android:visibility="gone" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16.0dp" />
+                <LinearLayout android:orientation="vertical" android:id="@id/footers" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10.0dp" />
+            </LinearLayout>
+        </ScrollView>
+        <include layout="@layout/play_single_button_bar" />
+    </LinearLayout>
+    <include android:visibility="gone" android:layout_width="match_parent" android:layout_height="match_parent" layout="@layout/page_loading_indicator" />
+</FrameLayout>

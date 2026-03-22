@@ -1,0 +1,30 @@
+# IDE
+*.iml
+.idea/caches
+.idea/libraries
+.idea/modules.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/workspace.xml
+.idea/shelf
+
+# Gradle / Android
+.gradle/
+.kotlin/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# Local env
+.env
+skills/
+
+# API / Bun / Node
+api/node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db

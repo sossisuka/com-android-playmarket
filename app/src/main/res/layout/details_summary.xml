@@ -1,0 +1,28 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.finsky.layout.DetailsSummary android:paddingRight="@dimen/details_content_margin" android:layout_width="match_parent" android:layout_height="wrap_content"
+  xmlns:android="http://schemas.android.com/apk/res/android" xmlns:finsky="http://schemas.android.com/apk/res-auto">
+    <com.google.android.finsky.layout.play.PlayCardThumbnail android:id="@id/li_thumbnail_frame" android:layout_width="@dimen/summary_thumbnail_small_size" android:layout_height="0.0dp" android:layout_marginRight="10.0dp" finsky:app_thumbnail_padding="@dimen/play_details_image_margin">
+        <com.google.android.finsky.layout.DocImageView android:id="@id/li_thumbnail" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" />
+    </com.google.android.finsky.layout.play.PlayCardThumbnail>
+    <TextView android:id="@id/title" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2.0dp" android:layout_toRightOf="@id/li_thumbnail_frame" android:layout_alignParentRight="true" style="@style/Play_DetailsPage_Title" />
+    <LinearLayout android:orientation="horizontal" android:id="@id/creator_panel" android:background="@drawable/highlight_overlay" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_toRightOf="@id/li_thumbnail_frame" android:layout_below="@id/title" android:layout_alignParentRight="true">
+        <com.google.android.finsky.layout.DecoratedTextView android:id="@id/creator" android:layout_width="wrap_content" android:layout_height="wrap_content" android:drawablePadding="4.0dp" style="@style/Play_DetailsPage_Subtitle" />
+        <ImageView android:layout_gravity="center_vertical" android:id="@id/more_arrow" android:paddingLeft="5.0dp" android:paddingTop="1.0dp" android:visibility="gone" android:layout_width="wrap_content" android:layout_height="wrap_content" android:src="@drawable/ic_more_creator_arrow" />
+    </LinearLayout>
+    <RelativeLayout android:id="@id/extra_info" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_toRightOf="@id/li_thumbnail_frame" android:layout_below="@id/creator_panel" android:layout_alignParentRight="true">
+        <com.google.android.finsky.layout.DecoratedTextView android:textSize="13.0sp" android:ellipsize="end" android:id="@id/tipper_sticker" android:paddingLeft="4.0dp" android:paddingRight="4.0dp" android:visibility="gone" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2.0dp" android:singleLine="true" />
+        <TextView android:gravity="right" android:id="@id/extra_offer_description" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginLeft="4.0dp" android:singleLine="false" android:layout_toRightOf="@id/tipper_sticker" android:layout_alignParentRight="true" style="@style/Play_DetailsPage_Subtitle" />
+    </RelativeLayout>
+    <RelativeLayout android:id="@id/details_summary_dynamic" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_toRightOf="@id/li_thumbnail_frame" android:layout_below="@id/extra_info" android:layout_alignParentRight="true">
+        <com.google.android.finsky.layout.DetailsButtonColumnLayout android:orientation="vertical" android:id="@id/button_container" android:paddingBottom="4.0dp" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_alignParentRight="true">
+            <include layout="@layout/details_action_buttons" />
+        </com.google.android.finsky.layout.DetailsButtonColumnLayout>
+        <TextView android:id="@id/optimal_device_class_warning" android:paddingRight="@dimen/details_content_margin" android:paddingBottom="12.0dp" android:visibility="gone" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_toLeftOf="@id/button_container" android:layout_alignBottom="@id/button_container" android:layout_alignParentLeft="true" style="@style/Play_DetailsPage_DeviceWarning" />
+        <com.google.android.finsky.layout.ExplorePanel android:id="@id/explorer_panel" android:paddingLeft="@dimen/details_content_margin" android:paddingRight="@dimen/details_content_margin" android:visibility="gone" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_toLeftOf="@id/button_container" android:layout_alignBottom="@id/button_container" android:layout_alignParentLeft="true">
+            <include layout="@layout/explorer_layout" />
+        </com.google.android.finsky.layout.ExplorePanel>
+        <include android:id="@id/download_progress_panel" android:visibility="gone" android:layout_width="match_parent" android:layout_height="wrap_content" layout="@layout/details_download_progress" />
+        <TextView android:textSize="@dimen/content_generic_small_size" android:textColor="@color/play_fg_details_secondary" android:gravity="center" android:id="@id/summary_dynamic_status" android:paddingTop="4.0dp" android:paddingBottom="4.0dp" android:visibility="gone" android:layout_width="match_parent" android:layout_height="wrap_content" android:singleLine="true" style="@style/PlayLightText" />
+    </RelativeLayout>
+</com.google.android.finsky.layout.DetailsSummary>
+

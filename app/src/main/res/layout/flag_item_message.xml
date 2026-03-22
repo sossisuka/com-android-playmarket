@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout android:paddingLeft="6.0dp" android:paddingTop="4.0dp" android:paddingRight="6.0dp" android:layout_width="match_parent" android:layout_height="match_parent"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <EditText android:textColor="?android:textColorPrimary" android:gravity="top" android:id="@id/flag_message" android:layout_width="match_parent" android:layout_height="match_parent" android:minLines="5" android:maxLength="@integer/max_review_length" android:freezesText="true" android:inputType="textCapSentences|textAutoCorrect|textMultiLine" />
+</FrameLayout>

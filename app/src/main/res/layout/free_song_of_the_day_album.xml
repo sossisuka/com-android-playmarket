@@ -1,0 +1,18 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.finsky.layout.FreeSongOfTheDayAlbumView android:orientation="vertical" android:paddingBottom="4.0dp" android:layout_width="match_parent" android:layout_height="wrap_content"
+  xmlns:android="http://schemas.android.com/apk/res/android" xmlns:finsky="http://schemas.android.com/apk/res-auto">
+    <TextView android:id="@id/header" android:focusable="false" android:layout_width="match_parent" android:text="@string/music_from_album" style="@style/Play_DetailsPage_HeaderText" />
+    <com.google.android.finsky.layout.play.PlayCardViewMedium android:id="@id/play_card" android:background="@drawable/card_bg_play" android:layout_width="match_parent" android:layout_height="@dimen/summary_thumbnail_small_size" android:layout_marginLeft="4.0dp" android:layout_marginRight="4.0dp" finsky:show_inline_creator_badge="true" finsky:supports_subtitle_and_rating="true">
+        <com.google.android.finsky.layout.play.PlayCardThumbnail android:id="@id/li_thumbnail_frame" android:layout_width="0.0dp" android:layout_height="match_parent" android:layout_marginRight="4.0dp" finsky:app_thumbnail_padding="@dimen/play_featured_grid_image_margin">
+            <com.google.android.finsky.layout.DocImageView android:id="@id/li_thumbnail" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" />
+        </com.google.android.finsky.layout.play.PlayCardThumbnail>
+        <com.google.android.play.layout.PlayTextView android:textSize="@dimen/play_large_size" android:id="@id/li_title" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginLeft="4.0dp" android:layout_marginTop="3.0dp" android:layout_marginRight="@dimen/play_card_overflow_safe" android:layout_toRightOf="@id/li_thumbnail_frame" android:layout_alignParentTop="true" android:layout_alignParentRight="true" style="@style/PlayCardTitle" />
+        <com.google.android.finsky.layout.play.PlayCardPriceView android:id="@id/li_price" android:layout_below="@id/li_title" android:layout_alignBaseline="@id/li_subtitle" android:layout_alignRight="@id/li_overflow" style="@style/PlayCardPriceLabel" />
+        <com.google.android.finsky.layout.DecoratedTextView android:id="@id/li_subtitle" android:paddingRight="6.0dp" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginLeft="4.0dp" android:layout_marginTop="-2.0dp" android:layout_toLeftOf="@id/li_price" android:layout_toRightOf="@id/li_thumbnail_frame" android:layout_below="@id/li_title" style="@style/PlayCardSubtitle" />
+        <RatingBar android:id="@id/li_rating" android:layout_marginLeft="4.0dp" android:layout_marginTop="2.0dp" android:layout_toRightOf="@id/li_thumbnail_frame" android:layout_below="@id/li_subtitle" style="@style/PlayRatingBarSmall" />
+        <ProgressBar android:id="@id/loading_progress_bar" android:layout_width="wrap_content" android:layout_height="wrap_content" android:indeterminate="true" android:layout_centerInParent="true" />
+        <View android:id="@id/accessibility_overlay" android:background="@drawable/highlight_overlay" android:focusable="true" android:nextFocusRight="@id/li_overflow" android:layout_width="match_parent" android:layout_height="match_parent" />
+        <com.google.android.finsky.layout.play.PlayCardOverflowView android:id="@id/li_overflow" android:nextFocusLeft="@id/accessibility_overlay" android:layout_marginTop="1.0dp" android:layout_marginRight="4.0dp" android:layout_alignParentTop="true" android:layout_alignParentRight="true" style="@style/PlayCardOverflow" />
+    </com.google.android.finsky.layout.play.PlayCardViewMedium>
+</com.google.android.finsky.layout.FreeSongOfTheDayAlbumView>
+

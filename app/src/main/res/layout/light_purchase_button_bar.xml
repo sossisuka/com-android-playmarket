@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout android:id="@id/continue_button_bar" android:paddingLeft="16.0dp" android:paddingTop="14.0dp" android:paddingRight="16.0dp" android:paddingBottom="14.0dp" android:layout_width="match_parent" android:layout_height="wrap_content"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <com.google.android.finsky.layout.PurchaseIconButtonGroup android:orientation="horizontal" android:id="@id/experiment_continue_button" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_alignParentRight="true" android:layout_centerVertical="true">
+        <ImageView android:id="@id/experiment_continue_button_icon" android:background="@color/purchase_button_icon_background" android:visibility="gone" android:layout_width="@dimen/purchase_button_icon_width" android:layout_height="28.0dp" />
+        <TextView android:id="@id/experiment_continue_button_label" android:focusable="false" android:layout_height="28.0dp" style="@style/Play_Purchase_ActionButton" />
+        <View android:id="@id/accessibility_overlay" android:background="@drawable/highlight_overlay" android:focusable="true" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    </com.google.android.finsky.layout.PurchaseIconButtonGroup>
+    <ImageView android:id="@id/logo" android:layout_width="wrap_content" android:layout_height="wrap_content" android:src="@drawable/logo_play_purchase_flow_gray_light" android:layout_alignParentLeft="true" android:layout_centerVertical="true" />
+</RelativeLayout>

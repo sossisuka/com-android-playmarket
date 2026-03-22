@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout android:gravity="bottom" android:orientation="vertical" android:id="@id/bucket_header" android:layout_width="match_parent" android:layout_height="@dimen/play_cluster_header_height"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <Spinner android:id="@id/section_corpus_spinner" android:background="@drawable/spinner_background_holo_dark" android:paddingBottom="2.0dp" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginLeft="13.0dp" />
+    <View android:id="@id/corpus_header_strip" android:layout_width="match_parent" android:layout_height="@dimen/list_separator_thickness" />
+</LinearLayout>

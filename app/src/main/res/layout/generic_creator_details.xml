@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.finsky.layout.ObservableScrollView android:layout_width="match_parent" android:layout_height="match_parent" android:fillViewport="true"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <LinearLayout android:orientation="vertical" android:id="@id/details_scroller_container" android:layout_width="match_parent" android:layout_height="wrap_content">
+        <include layout="@layout/creator_summary" />
+        <include layout="@layout/details_badges" />
+        <include layout="@layout/details_plusone" />
+        <com.google.android.finsky.layout.ExplorePanel android:id="@id/explorer_panel" android:paddingLeft="@dimen/details_content_margin" android:paddingTop="4.0dp" android:paddingRight="@dimen/details_content_margin" android:paddingBottom="6.0dp" android:visibility="gone" android:layout_width="match_parent" android:layout_height="wrap_content">
+            <include layout="@layout/explorer_layout" />
+        </com.google.android.finsky.layout.ExplorePanel>
+        <include android:id="@id/share_panel" layout="@layout/details_share" />
+        <include android:id="@id/song_list" layout="@layout/music_song_list" />
+        <include android:id="@id/episode_list" layout="@layout/episode_list" />
+        <include android:id="@id/body_of_work_panel" layout="@layout/details_pack_layout" />
+        <include layout="@layout/rate_review_section" />
+        <include android:id="@id/sample_reviews_panel" layout="@layout/details_reviews" />
+        <include android:id="@id/related_panel" layout="@layout/details_pack_layout" />
+        <include android:id="@id/links_panel" layout="@layout/details_listing_layout" />
+        <include android:id="@id/flag_content_panel" layout="@layout/details_listing_layout" />
+        <include android:id="@id/loading_footer" android:layout_width="match_parent" android:layout_height="wrap_content" layout="@layout/details_loading_footer" />
+    </LinearLayout>
+</com.google.android.finsky.layout.ObservableScrollView>

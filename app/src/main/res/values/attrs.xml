@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <attr name="fade_in_after_load" format="boolean" />
+    <attr name="fixed_bounds" format="boolean" />
+    <attr name="circle_cut" format="boolean" />
+    <attr name="max_height" format="dimension" />
+    <attr name="content" format="reference" />
+    <attr name="contentId" format="reference" />
+    <attr name="decoration_position" format="integer">
+        <enum name="left" value="0" />
+        <enum name="right" value="1" />
+    </attr>
+    <attr name="max_width" format="dimension" />
+    <attr name="max_size_layout_height" format="dimension" />
+    <attr name="max_content_width" format="dimension" />
+    <attr name="multi_account_drawable" format="reference" />
+    <attr name="proportion" format="fraction" />
+    <attr name="separator_padding_top" format="dimension" />
+    <attr name="separator_padding_bottom" format="dimension" />
+    <attr name="separator_padding_left" format="dimension" />
+    <attr name="separator_padding_right" format="dimension" />
+    <attr name="show_inline_creator_badge" format="boolean" />
+    <attr name="supports_subtitle_and_rating" format="boolean" />
+    <attr name="text_only_reason_margin_left" format="dimension" />
+    <attr name="owned_status_rendering_type">
+        <flag name="icon" value="0x1" />
+        <flag name="text" value="0x2" />
+    </attr>
+    <attr name="app_thumbnail_padding" format="dimension" />
+    <attr name="min_header_height" format="dimension" />
+    <attr name="card_content_padding_left" format="dimension" />
+    <attr name="card_content_padding_right" format="dimension" />
+    <attr name="card_content_padding_top" format="dimension" />
+    <attr name="card_content_padding_bottom" format="dimension" />
+    <attr name="restrict_avatars_to_button_width" format="boolean" />
+    <attr name="finskyButtonBarStyle" format="reference" />
+    <attr name="finskyButtonBarButtonStyle" format="reference" />
+    <attr name="draw_as_label" format="boolean" />
+    <attr name="use_all_caps_in_label_mode" format="boolean" />
+    <attr name="ignore_corpus_color" format="boolean" />
+    <attr name="action_xpadding" format="dimension" />
+    <attr name="allowsCompactLineSpacing" format="boolean" />
+    <attr name="lastLineOverdrawColor" format="color" />
+    <attr name="lastLineOverdrawHint" format="string" />
+    <attr name="lastLineOverdrawHintColor" format="color" />
+    <attr name="supportsHtmlLinks" format="boolean" />
+    <attr name="expandable" format="boolean" />
+</resources>
