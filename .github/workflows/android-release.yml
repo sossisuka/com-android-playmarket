@@ -74,6 +74,10 @@ jobs:
 
           printf "PLAY_API_BASE_URL=%s\n" "${API_URL}" > .env
 
+      - name: Make Gradle wrapper executable
+        shell: bash
+        run: chmod +x ./gradlew
+
       - name: Build debug APK
         shell: bash
         run: ./gradlew :app:assembleDebug
