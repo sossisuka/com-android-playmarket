@@ -2,30 +2,16 @@ name: Android Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - "**"
   workflow_dispatch:
-    inputs:
-      tag_name:
-        description: "Git tag for the release, for example v1.0.0"
-        required: true
-        type: string
-      release_name:
-        description: "Optional release title"
-        required: false
-        type: string
-      prerelease:
-        description: "Mark the GitHub Release as a prerelease"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
 
 concurrency:
-  group: android-release-${{ github.ref }}
-  cancel-in-progress: false
+  group: android-release-latest
+  cancel-in-progress: true
 
 jobs:
   build-and-release:
@@ -37,45 +23,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve release metadata
+      - name: Set release metadata
         id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG_NAME="${{ inputs.tag_name }}"
-            RELEASE_NAME="${{ inputs.release_name }}"
-            PRERELEASE="${{ inputs.prerelease }}"
-          else
-            TAG_NAME="${GITHUB_REF_NAME}"
-            RELEASE_NAME=""
-            PRERELEASE="false"
-          fi
-
-          if [ -z "${RELEASE_NAME}" ]; then
-            RELEASE_NAME="${TAG_NAME}"
-          fi
-
+          SHORT_SHA="$(git rev-parse --short HEAD)"
           {
-            echo "tag_name=${TAG_NAME}"
-            echo "release_name=${RELEASE_NAME}"
-            echo "prerelease=${PRERELEASE}"
+            echo "tag_name=latest"
+            echo "release_name=Latest APK build"
+            echo "short_sha=${SHORT_SHA}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Create tag for manual release
-        if: github.event_name == 'workflow_dispatch'
+      - name: Move latest tag to current commit
         shell: bash
         run: |
-          TAG_NAME="${{ steps.meta.outputs.tag_name }}"
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
-            git fetch --tags origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
-          else
-            git tag "${TAG_NAME}" "${GITHUB_SHA}"
-            git push origin "refs/tags/${TAG_NAME}"
-          fi
+          git tag -f "${{ steps.meta.outputs.tag_name }}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${{ steps.meta.outputs.tag_name }}" --force
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -116,7 +81,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: com.android.playmarket-${{ steps.meta.outputs.tag_name }}
+          name: com.android.playmarket-${{ github.ref_name }}-${{ steps.meta.outputs.short_sha }}
           path: app/build/outputs/apk/debug/com.android.playmarket.apk
           if-no-files-found: error
 
@@ -125,6 +90,12 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.tag_name }}
           name: ${{ steps.meta.outputs.release_name }}
-          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          generate_release_notes: true
+          prerelease: true
+          generate_release_notes: false
+          make_latest: false
+          overwrite_files: true
+          body: |
+            Automatic APK build from `${{ github.ref_name }}`.
+
+            Commit: `${{ github.sha }}`
           files: app/build/outputs/apk/debug/com.android.playmarket.apk
