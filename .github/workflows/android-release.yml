@@ -58,12 +58,17 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
 
-      - name: Create CI .env
+      - name: Prepare .env
         shell: bash
         env:
           PLAY_API_BASE_URL: ${{ vars.PLAY_API_BASE_URL }}
           PLAY_API_BASE_URL_SECRET: ${{ secrets.PLAY_API_BASE_URL }}
         run: |
+          if [ -f .env ]; then
+            echo "Using tracked .env from repository"
+            exit 0
+          fi
+
           API_URL="${PLAY_API_BASE_URL}"
           if [ -z "${API_URL}" ]; then
             API_URL="${PLAY_API_BASE_URL_SECRET}"
