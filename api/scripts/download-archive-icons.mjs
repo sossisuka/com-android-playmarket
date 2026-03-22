@@ -5,14 +5,11 @@ const APPS_FILE = path.resolve("src/data/apps.generated.ts");
 const ICONS_DIR = path.resolve("src/data/icons");
 const MISSING_FILE = path.join(ICONS_DIR, "missing.txt");
 const EXPORT_NAME = "generatedStoreApps";
+const CURRENT_YEAR = new Date().getUTCFullYear();
 const DEFAULT_YEAR = Number.parseInt(
   process.env.PLAY_ARCHIVE_YEAR ?? "2013",
   10,
 );
-const DEFAULT_TIMESTAMP_BY_YEAR = {
-  2013: "20131231000000",
-  2014: "20140222003733",
-};
 const DEFAULT_CONCURRENCY = Number.parseInt(
   process.env.PLAY_ARCHIVE_CONCURRENCY ?? "100",
   10,
@@ -86,11 +83,15 @@ function parseArgs(argv) {
     }
 
     if (arg.startsWith("--packages=")) {
-      options.packages = arg
-        .slice("--packages=".length)
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
+      options.packages = Array.from(
+        new Set(
+          arg
+            .slice("--packages=".length)
+            .split(/[\s,;\n\r\t]+/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+        ),
+      );
     }
   }
 
@@ -98,16 +99,17 @@ function parseArgs(argv) {
 }
 
 function assertTargetYear(year) {
-  if (year !== 2013 && year !== 2014) {
+  if (!Number.isInteger(year) || year < 2013 || year > CURRENT_YEAR) {
     throw new Error(
-      `Only archive years 2013 and 2014 are supported. Got: ${year}`,
+      `Archive year must be between 2013 and ${CURRENT_YEAR}. Got: ${year}`,
     );
   }
 }
 
 function resolveTimestamp(options) {
-  const timestamp =
-    options.timestamp || DEFAULT_TIMESTAMP_BY_YEAR[options.year] || "";
+  const timestamp = String(options.timestamp ?? "").trim();
+  if (!timestamp) return "";
+
   if (!/^\d{14}$/.test(timestamp)) {
     throw new Error(
       `Archive timestamp must be 14 digits (YYYYMMDDhhmmss). Got: ${timestamp || "<empty>"}`,
@@ -115,12 +117,6 @@ function resolveTimestamp(options) {
   }
 
   const timestampYear = Number.parseInt(timestamp.slice(0, 4), 10);
-  if (timestampYear !== 2013 && timestampYear !== 2014) {
-    throw new Error(
-      `Archive timestamp year must be 2013 or 2014. Got: ${timestamp}`,
-    );
-  }
-
   if (timestampYear !== options.year) {
     throw new Error(
       `--timestamp year (${timestampYear}) must match --year (${options.year}).`,
@@ -131,17 +127,7 @@ function resolveTimestamp(options) {
 }
 
 function buildArchivePlan(options) {
-  const primaryYear = options.year;
-  const primaryTimestamp = resolveTimestamp(options);
-
-  if (primaryYear === 2013) {
-    return [
-      { year: 2013, timestamp: primaryTimestamp },
-      { year: 2014, timestamp: DEFAULT_TIMESTAMP_BY_YEAR[2014] },
-    ];
-  }
-
-  return [{ year: primaryYear, timestamp: primaryTimestamp }];
+  return [{ year: options.year, timestamp: resolveTimestamp(options) }];
 }
 
 function parseGeneratedArray(sourceText, exportName) {
@@ -255,7 +241,8 @@ function backoffDelay(attempt) {
 
 class RateLimiter {
   constructor(callsPerSecond) {
-    this.minIntervalMs = callsPerSecond > 0 ? Math.ceil(1000 / callsPerSecond) : 0;
+    this.minIntervalMs =
+      callsPerSecond > 0 ? Math.ceil(1000 / callsPerSecond) : 0;
     this.nextAt = 0;
     this.cooldownUntil = 0;
   }
@@ -370,11 +357,11 @@ async function fetchBinary(url, label, kind) {
   };
 }
 
-async function hasArchiveSnapshot(packageId, year) {
+async function fetchSnapshotTimestamps(packageId, year) {
   const detailsUrl = `https://play.google.com/store/apps/details?id=${encodeURIComponent(packageId)}`;
   const cdxUrl =
     `https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(detailsUrl)}` +
-    `&from=${year}&to=${year}&output=json&fl=timestamp&filter=statuscode:200&filter=mimetype:text/html&limit=1`;
+    `&from=${year}&to=${year}&output=json&fl=timestamp&filter=statuscode:200&filter=mimetype:text/html&collapse=digest`;
 
   const response = await fetchArchive(
     cdxUrl,
@@ -382,7 +369,25 @@ async function hasArchiveSnapshot(packageId, year) {
     "cdx",
   );
   const rows = JSON.parse(await response.text());
-  return Array.isArray(rows) && rows.length > 1;
+  if (!Array.isArray(rows) || rows.length <= 1) return [];
+
+  return rows
+    .slice(1)
+    .map((row) => String(row[0] ?? ""))
+    .filter((timestamp) => /^\d{14}$/.test(timestamp))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function chooseSnapshotTimestamp(timestamps, preferredTimestamp = "") {
+  if (!Array.isArray(timestamps) || timestamps.length === 0) return "";
+  if (!/^\d{14}$/.test(String(preferredTimestamp))) return timestamps[0];
+
+  const preferred = Number.parseInt(preferredTimestamp, 10);
+  return [...timestamps].sort((left, right) => {
+    const leftDelta = Math.abs(Number.parseInt(left, 10) - preferred);
+    const rightDelta = Math.abs(Number.parseInt(right, 10) - preferred);
+    return leftDelta - rightDelta || left.localeCompare(right);
+  })[0];
 }
 
 function archivePageUrl(packageId, timestamp) {
@@ -467,7 +472,7 @@ async function findExistingIconBase(packageId) {
   return "";
 }
 
-async function saveArchiveIcon(packageId, year, timestamp, force) {
+async function saveArchiveIcon(packageId, year, preferredTimestamp, force) {
   await mkdir(ICONS_DIR, { recursive: true });
 
   const existing = await findExistingIconBase(packageId);
@@ -475,13 +480,17 @@ async function saveArchiveIcon(packageId, year, timestamp, force) {
     return { status: "skipped", packageId, filePath: existing };
   }
 
-  const snapshotExists = await hasArchiveSnapshot(packageId, year);
-  if (!snapshotExists) {
+  const timestamps = await fetchSnapshotTimestamps(packageId, year);
+  const chosenTimestamp = chooseSnapshotTimestamp(
+    timestamps,
+    preferredTimestamp,
+  );
+  if (!chosenTimestamp) {
     throw new Error(`no archived page found for ${packageId} in ${year}`);
   }
 
   const page = await fetchText(
-    archivePageUrl(packageId, timestamp),
+    archivePageUrl(packageId, chosenTimestamp),
     `page:${packageId}`,
     "page",
   );
@@ -552,7 +561,9 @@ async function saveArchiveIconWithFallback(packageId, plan, force) {
     return {
       status: "missing",
       packageId,
-      details: failures.map((item) => `${item.year}:${item.message}`).join(" | "),
+      details: failures
+        .map((item) => `${item.year}:${item.message}`)
+        .join(" | "),
     };
   }
 
@@ -572,7 +583,9 @@ async function runPool(items, concurrency, worker) {
     }
   }
 
-  const workers = Array.from({ length: Math.max(1, concurrency) }, () => consume());
+  const workers = Array.from({ length: Math.max(1, concurrency) }, () =>
+    consume(),
+  );
   await Promise.all(workers);
 }
 
@@ -603,7 +616,7 @@ async function main() {
   }
 
   console.log(
-    `[archive-icons] packages=${packageIds.length} years=${plan.map((item) => item.year).join("->")} timestamps=${plan.map((item) => item.timestamp).join("->")} concurrency=${options.concurrency} cdx_rps=${CDX_CALLS_PER_SECOND} page_rps=${PAGE_CALLS_PER_SECOND} image_rps=${IMAGE_CALLS_PER_SECOND} force=${options.force}`,
+    `[archive-icons] packages=${packageIds.length} years=${plan.map((item) => item.year).join("->")} timestamps=${plan.map((item) => item.timestamp || "<auto>").join("->")} concurrency=${options.concurrency} cdx_rps=${CDX_CALLS_PER_SECOND} page_rps=${PAGE_CALLS_PER_SECOND} image_rps=${IMAGE_CALLS_PER_SECOND} force=${options.force}`,
   );
 
   const summary = {

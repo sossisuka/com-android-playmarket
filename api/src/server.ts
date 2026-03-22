@@ -12,6 +12,7 @@ type RawApp = {
   installs?: string;
   color?: string;
   icon?: string;
+  image?: string;
   trailerImage?: string;
   trailerUrl?: string;
   screenshots?: string[];
@@ -470,6 +471,16 @@ function resolvedIconUrl(
   return absoluteUrl(req, `/icons/${encodeURIComponent(localFileName)}`);
 }
 
+function pickRemoteIconFallback(primary: string, secondary = ""): string {
+  const first = primary.trim();
+  if (/^https?:\/\//i.test(first)) return first;
+
+  const second = secondary.trim();
+  if (/^https?:\/\//i.test(second)) return second;
+
+  return first || second;
+}
+
 function withResolvedSummaryIcon(
   req: Request,
   iconIndex: Map<string, string>,
@@ -477,7 +488,12 @@ function withResolvedSummaryIcon(
 ): SummaryApp {
   return {
     ...app,
-    icon: resolvedIconUrl(req, iconIndex, app.id, app.icon),
+    icon: resolvedIconUrl(
+      req,
+      iconIndex,
+      app.id,
+      pickRemoteIconFallback(app.icon),
+    ),
   };
 }
 
@@ -490,7 +506,15 @@ function withResolvedRawIcon(
   if (!id) return app;
   return {
     ...app,
-    icon: resolvedIconUrl(req, iconIndex, id, String(app.icon ?? "")),
+    icon: resolvedIconUrl(
+      req,
+      iconIndex,
+      id,
+      pickRemoteIconFallback(
+        String(app.icon ?? ""),
+        String(app.image ?? ""),
+      ),
+    ),
   };
 }
 

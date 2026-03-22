@@ -1,14 +1,18 @@
 {
-    "name":  "play-google-api",
-    "version":  "1.0.0",
-    "private":  true,
-    "type":  "module",
-    "scripts":  {
-                    "dev":  "bun --watch src/server.ts",
-                    "start":  "bun src/server.ts",
-                    "download:archive-icons":  "bun scripts/download-archive-icons.mjs"
-                },
-    "devDependencies":  {
-                            "@types/bun":  "latest"
-                        }
+  "name": "play-google-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "download:archive-icons": "bun scripts/download-archive-icons.mjs",
+    "sync:archive-apps": "bun scripts/sync-archive-apps.mjs"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "dependencies": {
+    "google-play-scraper": "^10.1.2"
+  }
 }
