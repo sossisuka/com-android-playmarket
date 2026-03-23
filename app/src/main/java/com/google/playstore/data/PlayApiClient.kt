@@ -143,7 +143,11 @@ class PlayApiClient(private val baseUrl: String) {
         return mapJsonToStoreApp(json.optJSONObject("app") ?: return null, includeMedia = true)
     }
 
-    fun downloadApkToFile(packageId: String, destinationFile: File) {
+    fun downloadApkToFile(
+        packageId: String,
+        destinationFile: File,
+        onProgress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null
+    ) {
         val encodedId = encodeUrlPart(packageId)
         val url = URL(baseUrl.trimEnd('/') + "/apk/$encodedId")
         val connection = (url.openConnection() as HttpURLConnection).apply {
@@ -164,10 +168,40 @@ class PlayApiClient(private val baseUrl: String) {
                 error("APK download failed ($code): $message")
             }
 
+            val totalBytes = connection.contentLengthLong.takeIf { it > 0L } ?: -1L
+            onProgress?.invoke(0L, totalBytes)
             destinationFile.parentFile?.mkdirs()
             connection.inputStream.use { input ->
                 destinationFile.outputStream().use { output ->
-                    input.copyTo(output)
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var downloaded = 0L
+                    var read = input.read(buffer)
+                    var lastReportedPercent = -1
+
+                    while (read >= 0) {
+                        if (read > 0) {
+                            output.write(buffer, 0, read)
+                            downloaded += read
+                            if (onProgress != null) {
+                                if (totalBytes > 0) {
+                                    val percent = ((downloaded * 100L) / totalBytes)
+                                        .toInt()
+                                        .coerceIn(0, 100)
+                                    if (percent != lastReportedPercent) {
+                                        lastReportedPercent = percent
+                                        onProgress(downloaded, totalBytes)
+                                    }
+                                } else {
+                                    onProgress(downloaded, totalBytes)
+                                }
+                            }
+                        }
+                        read = input.read(buffer)
+                    }
+
+                    if (onProgress != null && totalBytes > 0 && lastReportedPercent < 100) {
+                        onProgress(downloaded, totalBytes)
+                    }
                 }
             }
         } finally {

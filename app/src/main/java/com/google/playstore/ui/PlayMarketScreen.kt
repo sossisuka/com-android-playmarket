@@ -2437,6 +2437,8 @@ private fun AppDetailsPage(
     var showUninstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var fullscreenShotIndex by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
     var installProgress by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
+    var installDownloadedBytes by rememberSaveable(app.id) { mutableStateOf(0L) }
+    var installTotalBytes by rememberSaveable(app.id) { mutableStateOf<Long?>(null) }
     var installErrorMessage by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
     var pendingApkCachePath by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
     var pendingInstallUri by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
@@ -2447,6 +2449,8 @@ private fun AppDetailsPage(
         }
         pendingApkCachePath = null
         pendingInstallUri = null
+        installDownloadedBytes = 0L
+        installTotalBytes = null
     }
 
     val installApkLauncher = rememberLauncherForActivityResult(
@@ -2519,7 +2523,9 @@ private fun AppDetailsPage(
             onInstall = {
                 showInstallDialog = false
                 installErrorMessage = null
-                installProgress = -1
+                installDownloadedBytes = 0L
+                installTotalBytes = null
+                installProgress = 0
 
                 scope.launch {
                     val apkCacheDir = File(context.cacheDir, "apk-installer")
@@ -2530,7 +2536,19 @@ private fun AppDetailsPage(
                             if (apkCacheFile.exists()) {
                                 apkCacheFile.delete()
                             }
-                            apiClient.downloadApkToFile(app.id, apkCacheFile)
+                            apiClient.downloadApkToFile(app.id, apkCacheFile) { downloadedBytes, totalBytes ->
+                                scope.launch {
+                                    installDownloadedBytes = downloadedBytes
+                                    installTotalBytes = totalBytes.takeIf { it > 0L }
+                                    installProgress = if (totalBytes > 0L) {
+                                        ((downloadedBytes * 100L) / totalBytes)
+                                            .toInt()
+                                            .coerceIn(0, 100)
+                                    } else {
+                                        0
+                                    }
+                                }
+                            }
                             apkCacheFile
                         }
                     }.onFailure {
@@ -2559,6 +2577,9 @@ private fun AppDetailsPage(
 
                     pendingApkCachePath = downloadedFile.absolutePath
                     pendingInstallUri = apkUri.toString()
+                    val finalSize = downloadedFile.length().coerceAtLeast(0L)
+                    installDownloadedBytes = finalSize
+                    installTotalBytes = installTotalBytes ?: finalSize
                     installProgress = 100
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -2687,6 +2708,8 @@ private fun AppDetailsPage(
                             Spacer(Modifier.height(6.dp))
                             HeaderDownloadProgressPanel(
                                 progress = installProgress ?: 0,
+                                downloadedBytes = installDownloadedBytes,
+                                totalBytes = installTotalBytes,
                                 onCancel = { installProgress = null },
                                 modifier = Modifier.fillMaxWidth(),
                                 showCancel = false
@@ -2944,13 +2967,29 @@ private fun AppDetailsPage(
 @Composable
 private fun HeaderDownloadProgressPanel(
     progress: Int,
+    downloadedBytes: Long,
+    totalBytes: Long?,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
     showCancel: Boolean = true
 ) {
-    val p = progress.coerceIn(-1, 100)
-    val downloadedMb = if (p < 0) 0f else 18f * (p / 100f)
-    val bytesLabel = if (p < 0) "Подготовка загрузки" else String.format(Locale.US, "%.1f MB / 18.0 MB", downloadedMb)
+    val total = totalBytes?.takeIf { it > 0L }
+    val actualProgress = if (total != null) {
+        ((downloadedBytes.coerceAtMost(total) * 100L) / total).toInt().coerceIn(0, 100)
+    } else {
+        progress.coerceIn(-1, 100)
+    }
+    val bytesLabel = when {
+        actualProgress < 0 -> tr("Подготовка загрузки", "Preparing download")
+        total != null -> "${formatBytesLabel(downloadedBytes)} / ${formatBytesLabel(total)}"
+        downloadedBytes > 0L -> formatBytesLabel(downloadedBytes)
+        else -> "0 B"
+    }
+    val progressText = when {
+        actualProgress < 0 -> tr("Ожидание", "Waiting")
+        total != null -> "$actualProgress%"
+        else -> tr("Загрузка", "Downloading")
+    }
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(3.dp),
@@ -2968,7 +3007,7 @@ private fun HeaderDownloadProgressPanel(
             )
             Spacer(Modifier.weight(1f))
             Text(
-                text = if (p < 0) "Ожидание" else "${p}%",
+                text = progressText,
                 color = Color(0xFF8B8B8B),
                 fontSize = 10.sp,
                 maxLines = 1
@@ -2984,11 +3023,27 @@ private fun HeaderDownloadProgressPanel(
                 )
             }
         }
-        if (p < 0) {
+        if (actualProgress < 0 || total == null) {
             LegacyKitkatWaitingBar(modifier = Modifier.fillMaxWidth())
         } else {
-            LegacyThinProgressBar(progress = p, modifier = Modifier.fillMaxWidth())
+            LegacyThinProgressBar(progress = actualProgress, modifier = Modifier.fillMaxWidth())
         }
+    }
+}
+
+private fun formatBytesLabel(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+
+    val kb = 1024.0
+    val mb = kb * 1024.0
+    val gb = mb * 1024.0
+    val value = bytes.toDouble()
+
+    return when {
+        value >= gb -> String.format(Locale.US, "%.2f GB", value / gb)
+        value >= mb -> String.format(Locale.US, "%.1f MB", value / mb)
+        value >= kb -> String.format(Locale.US, "%.1f KB", value / kb)
+        else -> "$bytes B"
     }
 }
 
