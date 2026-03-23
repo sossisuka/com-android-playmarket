@@ -1922,6 +1922,10 @@ private fun PlayPromotionsSwiper(heroBanners: List<HomeBanner>, onAppClick: (Sto
 
 @Composable
 private fun HeroBannerCard(banner: HomeBanner, onClick: () -> Unit) {
+    val bannerImageUrl = banner.app.trailerImageUrl
+        .ifBlank { banner.imageUrl }
+        .ifBlank { banner.app.iconUrl }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -1931,7 +1935,7 @@ private fun HeroBannerCard(banner: HomeBanner, onClick: () -> Unit) {
             .clickable { onClick() }
     ) {
         AsyncImage(
-            model = banner.imageUrl,
+            model = bannerImageUrl,
             contentDescription = banner.title,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop,
