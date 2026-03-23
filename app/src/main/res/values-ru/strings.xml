@@ -1077,7 +1077,7 @@ CVC-код – это четырехзначное число, располож
     <string name="season_number">Сезон %1$d</string>
     <string name="antenna_playlist">Плейлист</string>
     <string name="unsupported_page">Невозможно открыть страницу.</string>
-    <string name="widget_apps">Play Маркет</string>
+<string name="widget_apps">Play Маркет</string>
     <string name="widget_now_playing_family">Google Play</string>
     <string name="widget_now_playing">Google Play</string>
     <string name="widget_books_now_playing">Мои книги</string>
@@ -1300,7 +1300,22 @@ CVC-код – это четырехзначное число, располож
     <string name="details_everyone">Для всех</string>
     <string name="details_version_label">Версия</string>
     <string name="details_size_label">Размер</string>
-    <string name="details_reviews_title">Отзывы</string>
-    <string name="details_reviews_subtitle">Оценка пользователей</string>
-    <string name="details_similar_apps_title">Похожие приложения</string>
+<string name="details_reviews_title">Отзывы</string>
+<string name="details_reviews_subtitle">Оценка пользователей</string>
+<string name="details_similar_apps_title">Похожие приложения</string>
+<string name="apps_title">Приложения</string>
+<string name="drawer_home">Главная</string>
+<string name="drawer_editors_choice">Выбор редакции</string>
+<string name="home_games">ИГРЫ</string>
+<string name="home_editors_choice">ВЫБОР РЕДАКЦИИ</string>
+<string name="home_our_favorites">Наш выбор</string>
+<string name="home_recommended">Рекомендуем</string>
+<string name="search_apps_hint">Поиск приложений</string>
+<string name="tab_home">ГЛАВНАЯ</string>
+<string name="tab_categories">КАТЕГОРИИ</string>
+<string name="tab_top_grossing">КАССОВЫЕ</string>
+<string name="tab_top_new_paid">НОВЫЕ ПЛАТ.</string>
+<string name="tab_top_new_free">НОВЫЕ БЕСПЛ.</string>
+<string name="tab_top_paid">ТОП ПЛАТНЫХ</string>
+<string name="tab_top_free">ТОП БЕСПЛАТНЫХ</string>
 </resources>

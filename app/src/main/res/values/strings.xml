@@ -1331,4 +1331,19 @@ Learn more in Google Settings > Verify apps."</string>
     <string name="details_reviews_title">Reviews</string>
     <string name="details_reviews_subtitle">User rating</string>
     <string name="details_similar_apps_title">Similar apps</string>
+    <string name="apps_title">Apps</string>
+    <string name="drawer_home">Home</string>
+    <string name="drawer_editors_choice">Editors\' Choice</string>
+    <string name="home_games">GAMES</string>
+    <string name="home_editors_choice">EDITORS\' CHOICE</string>
+    <string name="home_our_favorites">Our Favorites</string>
+    <string name="home_recommended">Recommended</string>
+    <string name="search_apps_hint">Search apps</string>
+    <string name="tab_home">HOME</string>
+    <string name="tab_categories">CATEGORIES</string>
+    <string name="tab_top_grossing">TOP GROSSING</string>
+    <string name="tab_top_new_paid">TOP NEW PAID</string>
+    <string name="tab_top_new_free">TOP NEW FREE</string>
+    <string name="tab_top_paid">TOP PAID</string>
+    <string name="tab_top_free">TOP FREE</string>
 </resources>

@@ -1,4 +1,4 @@
-package com.google.playstore.ui
+﻿package com.google.playstore.ui
 
 import android.content.Intent
 import android.view.ContextThemeWrapper
@@ -217,7 +217,7 @@ fun PlayMarketScreen() {
                 LegacyTopBar(
                     title = selectedApp?.name
                         ?: selectedCategory?.let { categoryLabelRu(it) }
-                        ?: if (catalogMode == CatalogMode.Games) "Игры" else "Приложения",
+                        ?: if (catalogMode == CatalogMode.Games) stringResource(R.string.games_corpus_title) else stringResource(R.string.apps_title),
                     showBack = selectedApp != null || selectedCategory != null || searchMode,
                     appPageMode = selectedApp != null || selectedCategory != null,
                     showAppHeaderActions = selectedApp != null,
@@ -392,12 +392,12 @@ private fun MainTabsPager(
 @Composable
 private fun LegacyLeftDrawer(onItemClick: (DrawerSection) -> Unit) {
     val menuItems = listOf(
-        Triple(DrawerSection.Home, "Главная", R.mipmap.ic_menu_play),
-        Triple(DrawerSection.MyApps, "Мои приложения", R.drawable.ic_menu_market_myapps),
-        Triple(DrawerSection.Games, "Игры", R.mipmap.ic_menu_apps),
-        Triple(DrawerSection.Categories, "Категории", R.mipmap.ic_menu_apps),
-        Triple(DrawerSection.Editors, "Выбор редакции", R.drawable.ic_menu_market_wishlist),
-        Triple(DrawerSection.Settings, "Настройки", R.drawable.ic_menu_market_settings)
+        Triple(DrawerSection.Home, R.string.drawer_home, R.mipmap.ic_menu_play),
+        Triple(DrawerSection.MyApps, R.string.my_downloads_menu, R.drawable.ic_menu_market_myapps),
+        Triple(DrawerSection.Games, R.string.games_corpus_title, R.mipmap.ic_menu_apps),
+        Triple(DrawerSection.Categories, R.string.category_tab_title, R.mipmap.ic_menu_apps),
+        Triple(DrawerSection.Editors, R.string.drawer_editors_choice, R.drawable.ic_menu_market_wishlist),
+        Triple(DrawerSection.Settings, R.string.settings, R.drawable.ic_menu_market_settings)
     )
 
     ModalDrawerSheet(
@@ -415,7 +415,7 @@ private fun LegacyLeftDrawer(onItemClick: (DrawerSection) -> Unit) {
         ) {
             Image(painterResource(R.mipmap.ic_menu_play_store), null, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(8.dp))
-            Text("Play Маркет", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text(stringResource(R.string.launcher_name), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
         menuItems.forEach { (section, title, iconRes) ->
             Row(
@@ -433,7 +433,7 @@ private fun LegacyLeftDrawer(onItemClick: (DrawerSection) -> Unit) {
                     modifier = Modifier.size(20.dp)
                 )
                 Spacer(Modifier.width(14.dp))
-                Text(title, color = Color(0xFF3F3F3F), fontSize = 15.sp)
+                Text(stringResource(title), color = Color(0xFF3F3F3F), fontSize = 15.sp)
             }
             HorizontalDivider(color = Color(0x12000000))
         }
@@ -510,7 +510,7 @@ private fun LegacyTopBar(
                     keyboardActions = KeyboardActions(onSearch = {}),
                     modifier = Modifier.fillMaxWidth(),
                     decorationBox = { inner ->
-                        if (searchQuery.isBlank()) Text("Поиск приложений", color = Color(0xFF9E9E9E), fontSize = 14.sp)
+                        if (searchQuery.isBlank()) Text(stringResource(R.string.search_apps_hint), color = Color(0xFF9E9E9E), fontSize = 14.sp)
                         inner()
                     }
                 )
@@ -596,7 +596,7 @@ private fun TopTabs(current: HomeTab, onSelect: (HomeTab) -> Unit) {
             ) {
                 Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     Text(
-                        item.title,
+                        stringResource(item.titleRes),
                         color = if (selected) Color(0xFF333333) else Color(0xFF808080),
                         fontSize = 10.sp,
                         maxLines = 1
@@ -663,13 +663,13 @@ private fun LegacyHomePage(homePayload: HomePayload?, fallbackApps: List<StoreAp
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                SmallCategoryCard("ИГРЫ", R.mipmap.ic_menu_apps, Modifier.weight(1f))
-                SmallCategoryCard("ВЫБОР РЕДАКЦИИ", R.drawable.ic_menu_market_wishlist, Modifier.weight(1f))
+                SmallCategoryCard(stringResource(R.string.home_games), R.mipmap.ic_menu_apps, Modifier.weight(1f))
+                SmallCategoryCard(stringResource(R.string.home_editors_choice), R.drawable.ic_menu_market_wishlist, Modifier.weight(1f))
             }
         }
-        item { SectionRow(localizeSectionTitle(firstSection?.title ?: "Our Favorites")) }
+        item { SectionRow(localizeSectionTitle(firstSection?.title ?: stringResource(R.string.home_our_favorites))) }
         item { HorizontalAppsRow(first, onAppClick) }
-        item { SectionRow(localizeSectionTitle(secondSection?.title ?: "Рекомендуем")) }
+        item { SectionRow(localizeSectionTitle(secondSection?.title ?: stringResource(R.string.home_recommended))) }
         item { HorizontalAppsRow(second, onAppClick) }
     }
 }
@@ -938,7 +938,7 @@ private fun PagedChartPage(
             LegacyPlayLoadingSpinner(size = 30.dp)
         }
         error != null && items.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Ошибка загрузки\n$error", color = Color(0xFF555555), fontSize = 14.sp)
+            Text("РћС€РёР±РєР° Р·Р°РіСЂСѓР·РєРё\n$error", color = Color(0xFF555555), fontSize = 14.sp)
         }
         else -> LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -1006,6 +1006,7 @@ private fun PlayChartListItem(app: StoreApp, style: ChartCardStyle = ChartCardSt
     val chartSubtitleColor = Color(0xFF8B8B8B)
     val chartRatingColor = Color(0xFF7D7D7D)
     val chartCountColor = Color(0xFFA0A0A0)
+    val statusLabel = appCardStatusLabel(app)
     val interactionSource = remember { MutableInteractionSource() }
     val hovered by interactionSource.collectIsHoveredAsState()
     val pressed by interactionSource.collectIsPressedAsState()
@@ -1075,10 +1076,11 @@ private fun PlayChartListItem(app: StoreApp, style: ChartCardStyle = ChartCardSt
                     }
                     Spacer(Modifier.weight(1f))
                     Text(
-                        text = priceLabelForUi(app),
+                        text = statusLabel,
                         color = chartPriceColor,
-                        fontSize = 12.sp,
-                        maxLines = 1
+                        fontSize = if (isAppInstalledOnDevice(LocalContext.current, app.id)) 10.sp else 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -1139,10 +1141,11 @@ private fun PlayChartListItem(app: StoreApp, style: ChartCardStyle = ChartCardSt
             }
         }
         Text(
-            text = priceLabelForUi(app),
+            text = statusLabel,
             color = chartPriceColor,
-            fontSize = 12.sp,
-            maxLines = 1
+            fontSize = if (isAppInstalledOnDevice(LocalContext.current, app.id)) 10.sp else 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
     HorizontalDivider(color = Color(0x14000000), modifier = Modifier.padding(start = 88.dp))
@@ -1249,12 +1252,18 @@ private fun SearchResultsPage(
 
 @Composable
 private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDetails: Boolean, onAppClick: (StoreApp) -> Unit) {
+    val context = LocalContext.current
+    val packageManager = context.packageManager
     val uriHandler = LocalUriHandler.current
     val screenshots = app.screenshots.ifEmpty { if (app.iconUrl.isBlank()) emptyList() else listOf(app.iconUrl) }
     val descriptionText = app.descriptionBlocks.joinToString("\n\n").ifBlank { app.subtitle.ifBlank { "Описание отсутствует" } }
     val whatsNewText = app.whatsNew.joinToString("\n").ifBlank { "" }
     val similarApps = remember(app.similarAppIds, catalogApps) { app.similarAppIds.mapNotNull { id -> catalogApps.firstOrNull { it.id == id } } }
     val moreFromDeveloper = remember(app.moreFromDeveloperIds, catalogApps) { app.moreFromDeveloperIds.mapNotNull { id -> catalogApps.firstOrNull { it.id == id } } }
+    val launchIntent = remember(packageManager, app.id) { packageManager.getLaunchIntentForPackage(app.id) }
+    val isInstalledOnDevice = remember(context, app.id, launchIntent) {
+        isAppInstalledOnDevice(context, app.id) || launchIntent != null
+    }
     var showInstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var fullscreenShotIndex by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
     var installProgress by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
@@ -1362,7 +1371,7 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
                         if (installProgress == null) {
                             Spacer(Modifier.height(6.dp))
                             LegacyStarText(rating = ratingForCard(app))
-                            Text("${app.reviews} отзывов", color = Color(0xFF9A9A9A), fontSize = 11.sp, maxLines = 1)
+                            Text("${app.reviews} ${tr("отзывов", "reviews")}", color = Color(0xFF9A9A9A), fontSize = 11.sp, maxLines = 1)
                         } else {
                             Spacer(Modifier.height(6.dp))
                             HeaderDownloadProgressPanel(
@@ -1374,16 +1383,33 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
                         }
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text(priceLabelForUi(app), color = Color(0xFF7C7C7C), fontSize = 15.sp)
-                        Spacer(Modifier.height(6.dp))
+                        if (app.isFree) {
+                            Text(priceLabelForUi(app), color = Color(0xFF7C7C7C), fontSize = 15.sp)
+                            Spacer(Modifier.height(6.dp))
+                        }
                         if (installProgress == null) {
                             Box(
                                 Modifier
                                     .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
-                                    .clickable { showInstallDialog = true }
+                                    .clickable {
+                                        if (isInstalledOnDevice && launchIntent != null) {
+                                            context.startActivity(launchIntent)
+                                        } else {
+                                            showInstallDialog = true
+                                        }
+                                    }
                                     .padding(horizontal = 14.dp, vertical = 7.dp)
                             ) {
-                                Text("УСТАНОВИТЬ", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = when {
+                                        isInstalledOnDevice -> stringResource(R.string.open).uppercase(Locale.getDefault())
+                                        app.isFree -> stringResource(R.string.install).uppercase(Locale.getDefault())
+                                        else -> priceLabelForUi(app)
+                                    },
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         } else {
                             Row(
@@ -1410,8 +1436,8 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                DetailsSmallAction(R.drawable.ic_menu_market_wishlist, "В список желаний", Modifier.weight(1f))
-                DetailsSmallAction(R.drawable.ic_menu_share_holo_dark, "Поделиться", Modifier.weight(1f))
+                DetailsSmallAction(R.drawable.ic_menu_market_wishlist, tr("В список желаний", "Add to wishlist"), Modifier.weight(1f))
+                DetailsSmallAction(R.drawable.ic_menu_share_holo_dark, tr("Поделиться", "Share"), Modifier.weight(1f))
             }
             HorizontalDivider(color = Color(0x12000000))
         }
@@ -1735,7 +1761,12 @@ private fun DetailsSmallAction(iconRes: Int, label: String, modifier: Modifier =
             .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Image(painterResource(iconRes), null, modifier = Modifier.size(16.dp))
+        Image(
+            painter = painterResource(iconRes),
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color(0xFF6F6F6F))
+        )
         Spacer(Modifier.width(6.dp))
         Text(label, color = Color(0xFF666666), fontSize = 11.sp, maxLines = 1)
     }
@@ -1762,7 +1793,7 @@ private fun LegacyInstallDialog(
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text("Установка приложения", color = Color(0xFF333333), fontSize = 18.sp, fontWeight = FontWeight.Normal)
+            Text(tr("Установка приложения", "Install application"), color = Color(0xFF333333), fontSize = 18.sp, fontWeight = FontWeight.Normal)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 AppIconImage(url = appIconUrl, iconSize = 42.dp, cornerRadius = 6.dp)
                 Spacer(Modifier.width(8.dp))
@@ -1778,19 +1809,19 @@ private fun LegacyInstallDialog(
             Text(appPublisher, color = Color(0xFF7B7B7B), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             InstallDialogInfoRow(
                 iconRes = R.drawable.ic_store_credit_card_light,
-                text = "Цена: $priceLabel"
+                text = tr("Цена", "Price") + ": $priceLabel"
             )
             InstallDialogInfoRow(
                 iconRes = R.drawable.ic_menu_market_myapps,
-                text = "Приложение будет установлено на устройство."
+                text = tr("Приложение будет установлено на устройство.", "The application will be installed on the device.")
             )
             InstallDialogInfoRow(
                 iconRes = R.drawable.ic_menu_warning,
-                text = "Проверьте подключение к сети перед установкой."
+                text = tr("Проверьте подключение к сети перед установкой.", "Check your network connection before installation.")
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Text(
-                    "ОТМЕНА",
+                    tr("ОТМЕНА", "CANCEL"),
                     color = Color(0xFF7F7F7F),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -1803,7 +1834,7 @@ private fun LegacyInstallDialog(
                         .clickable { onInstall() }
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
-                    Text("ПРИНЯТЬ", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(tr("ПРИНЯТЬ", "ACCEPT"), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -1902,7 +1933,7 @@ private fun LegacyReviewsBlock(app: StoreApp) {
                 .padding(1.dp)
         ) {
             Text(
-                text = "СРЕДНЯЯ ОЦЕНКА",
+                text = tr("СРЕДНЯЯ ОЦЕНКА", "AVERAGE RATING"),
                 color = Color.White,
                 fontSize = 11.sp,
                 modifier = Modifier
@@ -2130,6 +2161,7 @@ private fun HorizontalAppsRow(apps: List<StoreApp>, onAppClick: (StoreApp) -> Un
 
 @Composable
 private fun LegacyAppTile(app: StoreApp, onClick: () -> Unit) {
+    val statusLabel = appCardStatusLabel(app)
     val interactionSource = remember { MutableInteractionSource() }
     val hovered by interactionSource.collectIsHoveredAsState()
     val pressed by interactionSource.collectIsPressedAsState()
@@ -2182,7 +2214,14 @@ private fun LegacyAppTile(app: StoreApp, onClick: () -> Unit) {
                     modifier = Modifier
                 )
                 Spacer(Modifier.weight(1f))
-                Text(priceLabelForUi(app), color = Color(0xFF96B62A), fontSize = 11.sp, textAlign = TextAlign.End)
+                Text(
+                    statusLabel,
+                    color = Color(0xFF96B62A),
+                    fontSize = if (isAppInstalledOnDevice(LocalContext.current, app.id)) 9.sp else 11.sp,
+                    textAlign = TextAlign.End,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }
@@ -2190,6 +2229,7 @@ private fun LegacyAppTile(app: StoreApp, onClick: () -> Unit) {
 
 @Composable
 private fun CompactListItem(app: StoreApp, onClick: () -> Unit) {
+    val statusLabel = appCardStatusLabel(app)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2213,7 +2253,13 @@ private fun CompactListItem(app: StoreApp, onClick: () -> Unit) {
             Text(app.publisher, color = Color(0xFF888888), fontSize = 12.sp, maxLines = 1)
             LegacyStarText(rating = ratingForCard(app))
         }
-        Text(priceLabelForUi(app), color = Color(0xFF96B62A), fontSize = 12.sp)
+        Text(
+            statusLabel,
+            color = Color(0xFF96B62A),
+            fontSize = if (isAppInstalledOnDevice(LocalContext.current, app.id)) 10.sp else 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
     HorizontalDivider(color = Color(0x12000000), modifier = Modifier.padding(start = 76.dp))
 }
@@ -2315,6 +2361,26 @@ private fun priceLabelForUi(app: StoreApp): String {
     }
 }
 
+@Composable
+private fun appCardStatusLabel(app: StoreApp): String {
+    val context = LocalContext.current
+    val isInstalledOnDevice = remember(context, app.id) {
+        isAppInstalledOnDevice(context, app.id)
+    }
+    return if (isInstalledOnDevice) {
+        stringResource(R.string.installed_list_state).uppercase(Locale.getDefault())
+    } else {
+        priceLabelForUi(app)
+    }
+}
+
+private fun isAppInstalledOnDevice(context: android.content.Context, packageName: String): Boolean {
+    if (packageName.isBlank()) return false
+    val packageManager = context.packageManager
+    if (packageManager.getLaunchIntentForPackage(packageName) != null) return true
+    return runCatching { packageManager.getPackageInfo(packageName, 0) }.isSuccess
+}
+
 private fun starsByRating(rating: Float, reviews: Long): String {
     if (rating > 0f) {
         val rounded = kotlin.math.round(rating * 10f) / 10f
@@ -2326,13 +2392,17 @@ private fun starsByRating(rating: Float, reviews: Long): String {
 private fun localizeSectionTitle(title: String): String {
     return when (title.trim()) {
         "Top Free" -> "Топ бесплатных"
+        "Top Free Apps" -> "Топ бесплатных"
         "Top Paid" -> "Топ платных"
+        "Top Paid Apps" -> "Топ платных"
         "Top Grossing" -> "Самые кассовые"
         "Top New Paid" -> "Новые платные"
         "Top New Free" -> "Новые бесплатные"
         "Editors' Choice" -> "Выбор редакции"
+        "Editor's Choice" -> "Выбор редакции"
         "Games" -> "Игры"
         "Our Favorites" -> "Наш выбор"
+        "Recommended" -> "Рекомендуем"
         else -> title
     }
 }
@@ -2388,71 +2458,71 @@ private fun categoryLabelRu(raw: String): String {
     if (key.isBlank()) return ""
 
     val direct = mapOf(
-        "GAME_ACTION" to "Игры: Экшен",
-        "GAME_ARCADE" to "Игры: Аркады",
-        "GAME_ADVENTURE" to "Игры: Приключения",
-        "GAME_CASUAL" to "Игры: Казуальные",
-        "GAME_CARD" to "Игры: Карточные",
-        "GAME_CASINO" to "Игры: Казино",
-        "GAME_MUSIC" to "Игры: Музыкальные",
-        "GAME_PUZZLE" to "Игры: Головоломки",
-        "GAME_RACING" to "Игры: Гонки",
-        "GAME_ROLE_PLAYING" to "Игры: Ролевые",
-        "GAME_SIMULATION" to "Игры: Симуляторы",
-        "GAME_SPORTS" to "Игры: Спорт",
-        "GAME_STRATEGY" to "Игры: Стратегии",
-        "GAME_TRIVIA" to "Игры: Викторины",
-        "GAME_WORD" to "Игры: Слова",
-        "PRODUCTIVITY" to "Продуктивность",
-        "COMMUNICATION" to "Связь",
-        "SOCIAL" to "Социальные",
-        "SHOPPING" to "Покупки",
-        "TOOLS" to "Инструменты",
-        "EDUCATION" to "Образование",
-        "BUSINESS" to "Бизнес",
-        "FINANCE" to "Финансы",
-        "LIFESTYLE" to "Стиль жизни",
-        "HEALTH_AND_FITNESS" to "Здоровье и фитнес",
-        "BOOKS_AND_REFERENCE" to "Книги и справка",
-        "MUSIC_AND_AUDIO" to "Музыка и аудио",
-        "VIDEO_PLAYERS" to "Видеоплееры",
-        "ENTERTAINMENT" to "Развлечения",
-        "PHOTOGRAPHY" to "Фотография",
-        "TRAVEL_AND_LOCAL" to "Путешествия",
-        "FOOD_AND_DRINK" to "Еда и напитки",
-        "PERSONALIZATION" to "Персонализация",
-        "NEWS_AND_MAGAZINES" to "Новости и журналы",
-        "MAPS_AND_NAVIGATION" to "Карты и навигация",
-        "AUTO_AND_VEHICLES" to "Авто и транспорт",
-        "WEATHER" to "Погода",
-        "PARENTING" to "Для родителей",
-        "LIBRARIES_AND_DEMO" to "Библиотеки и демо"
+        "GAME_ACTION" to tr("Игры: Экшен", "Games: Action"),
+        "GAME_ARCADE" to tr("Игры: Аркады", "Games: Arcade"),
+        "GAME_ADVENTURE" to tr("Игры: Приключения", "Games: Adventure"),
+        "GAME_CASUAL" to tr("Игры: Казуальные", "Games: Casual"),
+        "GAME_CARD" to tr("Игры: Карточные", "Games: Card"),
+        "GAME_CASINO" to tr("Игры: Казино", "Games: Casino"),
+        "GAME_MUSIC" to tr("Игры: Музыкальные", "Games: Music"),
+        "GAME_PUZZLE" to tr("Игры: Головоломки", "Games: Puzzle"),
+        "GAME_RACING" to tr("Игры: Гонки", "Games: Racing"),
+        "GAME_ROLE_PLAYING" to tr("Игры: Ролевые", "Games: Role Playing"),
+        "GAME_SIMULATION" to tr("Игры: Симуляторы", "Games: Simulation"),
+        "GAME_SPORTS" to tr("Игры: Спорт", "Games: Sports"),
+        "GAME_STRATEGY" to tr("Игры: Стратегии", "Games: Strategy"),
+        "GAME_TRIVIA" to tr("Игры: Викторины", "Games: Trivia"),
+        "GAME_WORD" to tr("Игры: Слова", "Games: Word"),
+        "PRODUCTIVITY" to tr("Продуктивность", "Productivity"),
+        "COMMUNICATION" to tr("Связь", "Communication"),
+        "SOCIAL" to tr("Социальные", "Social"),
+        "SHOPPING" to tr("Покупки", "Shopping"),
+        "TOOLS" to tr("Инструменты", "Tools"),
+        "EDUCATION" to tr("Образование", "Education"),
+        "BUSINESS" to tr("Бизнес", "Business"),
+        "FINANCE" to tr("Финансы", "Finance"),
+        "LIFESTYLE" to tr("Стиль жизни", "Lifestyle"),
+        "HEALTH_AND_FITNESS" to tr("Здоровье и фитнес", "Health & Fitness"),
+        "BOOKS_AND_REFERENCE" to tr("Книги и справка", "Books & Reference"),
+        "MUSIC_AND_AUDIO" to tr("Музыка и аудио", "Music & Audio"),
+        "VIDEO_PLAYERS" to tr("Видеоплееры", "Video Players"),
+        "ENTERTAINMENT" to tr("Развлечения", "Entertainment"),
+        "PHOTOGRAPHY" to tr("Фотография", "Photography"),
+        "TRAVEL_AND_LOCAL" to tr("Путешествия", "Travel & Local"),
+        "FOOD_AND_DRINK" to tr("Еда и напитки", "Food & Drink"),
+        "PERSONALIZATION" to tr("Персонализация", "Personalization"),
+        "NEWS_AND_MAGAZINES" to tr("Новости и журналы", "News & Magazines"),
+        "MAPS_AND_NAVIGATION" to tr("Карты и навигация", "Maps & Navigation"),
+        "AUTO_AND_VEHICLES" to tr("Авто и транспорт", "Auto & Vehicles"),
+        "WEATHER" to tr("Погода", "Weather"),
+        "PARENTING" to tr("Для родителей", "Parenting"),
+        "LIBRARIES_AND_DEMO" to tr("Библиотеки и демо", "Libraries & Demo")
     )
     direct[key]?.let { return it }
 
     val tokenMap = mapOf(
-        "GAME" to "Игры",
-        "ACTION" to "Экшен",
-        "ARCADE" to "Аркады",
-        "ADVENTURE" to "Приключения",
-        "CASUAL" to "Казуальные",
-        "CARD" to "Карточные",
-        "CASINO" to "Казино",
-        "MUSIC" to "Музыкальные",
-        "PUZZLE" to "Головоломки",
-        "RACING" to "Гонки",
-        "ROLE" to "Ролевые",
+        "GAME" to tr("Игры", "Games"),
+        "ACTION" to tr("Экшен", "Action"),
+        "ARCADE" to tr("Аркады", "Arcade"),
+        "ADVENTURE" to tr("Приключения", "Adventure"),
+        "CASUAL" to tr("Казуальные", "Casual"),
+        "CARD" to tr("Карточные", "Card"),
+        "CASINO" to tr("Казино", "Casino"),
+        "MUSIC" to tr("Музыкальные", "Music"),
+        "PUZZLE" to tr("Головоломки", "Puzzle"),
+        "RACING" to tr("Гонки", "Racing"),
+        "ROLE" to tr("Ролевые", "Role Playing"),
         "PLAYING" to "",
-        "SIMULATION" to "Симуляторы",
-        "SPORTS" to "Спорт",
-        "STRATEGY" to "Стратегии",
-        "TRIVIA" to "Викторины",
-        "WORD" to "Слова",
-        "PRODUCTIVITY" to "Продуктивность",
-        "COMMUNICATION" to "Связь",
-        "SOCIAL" to "Социальные",
-        "SHOPPING" to "Покупки",
-        "TOOLS" to "Инструменты"
+        "SIMULATION" to tr("Симуляторы", "Simulation"),
+        "SPORTS" to tr("Спорт", "Sports"),
+        "STRATEGY" to tr("Стратегии", "Strategy"),
+        "TRIVIA" to tr("Викторины", "Trivia"),
+        "WORD" to tr("Слова", "Word"),
+        "PRODUCTIVITY" to tr("Продуктивность", "Productivity"),
+        "COMMUNICATION" to tr("Связь", "Communication"),
+        "SOCIAL" to tr("Социальные", "Social"),
+        "SHOPPING" to tr("Покупки", "Shopping"),
+        "TOOLS" to tr("Инструменты", "Tools")
     )
 
     val translated = key

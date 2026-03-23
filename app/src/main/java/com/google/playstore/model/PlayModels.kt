@@ -1,16 +1,18 @@
 package com.google.playstore.model
 
+import androidx.annotation.StringRes
 import androidx.compose.ui.graphics.Color
+import com.google.playstore.R
 import java.util.Locale
 
-enum class HomeTab(val title: String) {
-    Categories("КАТЕГОРИИ"),
-    Home("ГЛАВНАЯ"),
-    TopGrossing("КАССОВЫЕ"),
-    TopNewPaid("НОВЫЕ ПЛАТ."),
-    TopNewFree("НОВЫЕ БЕСПЛ."),
-    TopPaid("ТОП ПЛАТНЫХ"),
-    TopFree("ТОП БЕСПЛАТНЫХ")
+enum class HomeTab(@StringRes val titleRes: Int) {
+    Categories(R.string.tab_categories),
+    Home(R.string.tab_home),
+    TopGrossing(R.string.tab_top_grossing),
+    TopNewPaid(R.string.tab_top_new_paid),
+    TopNewFree(R.string.tab_top_new_free),
+    TopPaid(R.string.tab_top_paid),
+    TopFree(R.string.tab_top_free)
 }
 
 enum class CatalogMode { Apps, Games }
