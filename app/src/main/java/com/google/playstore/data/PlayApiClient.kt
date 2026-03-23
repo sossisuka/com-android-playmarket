@@ -5,6 +5,8 @@ import com.google.playstore.model.HomeBanner
 import com.google.playstore.model.HomeFeedSection
 import com.google.playstore.model.HomePayload
 import com.google.playstore.model.ApiPage
+import com.google.playstore.model.AuthSession
+import com.google.playstore.model.AuthUser
 import com.google.playstore.model.StoreApp
 import java.net.HttpURLConnection
 import java.net.URL
@@ -17,6 +19,42 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class PlayApiClient(private val baseUrl: String) {
+    fun register(
+        email: String,
+        password: String,
+        firstName: String,
+        lastName: String,
+        country: String
+    ): AuthSession {
+        val payload = JSONObject().apply {
+            put("email", email)
+            put("password", password)
+            put("firstName", firstName)
+            put("lastName", lastName)
+            put("country", country)
+        }
+        val json = requestJson("POST", "/auth/register", body = payload)
+        return mapAuthSession(json)
+    }
+
+    fun login(email: String, password: String): AuthSession {
+        val payload = JSONObject().apply {
+            put("email", email)
+            put("password", password)
+        }
+        val json = requestJson("POST", "/auth/login", body = payload)
+        return mapAuthSession(json)
+    }
+
+    fun readCurrentUser(token: String): AuthUser {
+        val json = requestJson("GET", "/auth/me", authToken = token)
+        return mapAuthUser(json.optJSONObject("user"))
+    }
+
+    fun logout(token: String) {
+        requestJson("POST", "/auth/logout", authToken = token)
+    }
+
     fun readInitialSummaries(limit: Int = 300): List<StoreApp> {
         return readSummariesPage(offset = 0, limit = limit, mode = "all").items
     }
@@ -147,26 +185,71 @@ class PlayApiClient(private val baseUrl: String) {
     }
 
     private fun getJson(pathWithQuery: String): JSONObject {
+        return requestJson("GET", pathWithQuery)
+    }
+
+    private fun requestJson(
+        method: String,
+        pathWithQuery: String,
+        body: JSONObject? = null,
+        authToken: String? = null
+    ): JSONObject {
         val url = URL(baseUrl.trimEnd('/') + pathWithQuery)
         val connection = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
+            requestMethod = method
             connectTimeout = 15_000
             readTimeout = 60_000
             setRequestProperty("Accept", "application/json")
+            if (!authToken.isNullOrBlank()) {
+                setRequestProperty("Authorization", "Bearer $authToken")
+            }
+            if (body != null) {
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
         }
 
         return try {
+            if (body != null) {
+                connection.outputStream.bufferedWriter(Charsets.UTF_8).use { writer ->
+                    writer.write(body.toString())
+                }
+            }
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             if (code !in 200..299) {
-                error("API request failed ($code): $text")
+                val apiError = runCatching { JSONObject(text).optString("error") }.getOrDefault("")
+                val message = apiError.ifBlank { text.ifBlank { "HTTP $code" } }
+                error("API request failed ($code): $message")
             }
-            JSONObject(text)
+            if (text.isBlank()) JSONObject() else JSONObject(text)
         } finally {
             connection.disconnect()
         }
     }
+}
+
+private fun mapAuthSession(obj: JSONObject): AuthSession {
+    return AuthSession(
+        token = obj.optString("token"),
+        user = mapAuthUser(obj.optJSONObject("user"))
+    )
+}
+
+private fun mapAuthUser(obj: JSONObject?): AuthUser {
+    val safe = obj ?: JSONObject()
+    return AuthUser(
+        id = safe.optString("id"),
+        email = safe.optString("email"),
+        firstName = safe.optString("firstName"),
+        lastName = safe.optString("lastName"),
+        name = safe.optString("name"),
+        country = safe.optString("country"),
+        createdAt = safe.optString("createdAt"),
+        favoriteAppIds = safe.optJSONArray("favoriteAppIds").toStringList(),
+        libraryAppIds = safe.optJSONArray("libraryAppIds").toStringList()
+    )
 }
 
 private fun mapJsonToStoreApp(obj: JSONObject, includeMedia: Boolean): StoreApp {

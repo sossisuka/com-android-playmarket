@@ -1346,4 +1346,19 @@ Learn more in Google Settings > Verify apps."</string>
     <string name="tab_top_new_free">TOP NEW FREE</string>
     <string name="tab_top_paid">TOP PAID</string>
     <string name="tab_top_free">TOP FREE</string>
+    <string name="auth_sign_in_title">Sign in</string>
+    <string name="auth_register_title">Create account</string>
+    <string name="auth_create_account_action">Create account</string>
+    <string name="auth_need_google_account">Need a Google Account?</string>
+    <string
+        name="auth_have_google_account"
+    >Already have a Google Account?</string>
+    <string name="auth_confirm_password">Confirm password</string>
+    <string name="auth_password_mismatch">Passwords do not match.</string>
+    <string name="auth_fill_required">Fill in all required fields.</string>
+    <string
+        name="auth_register_subtitle"
+    >Create a Google Account to use Google Play Store on this device.</string>
+    <string name="auth_signed_in_as">Signed in as</string>
+    <string name="auth_sign_out">Sign out</string>
 </resources>

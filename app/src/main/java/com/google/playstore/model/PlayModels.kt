@@ -89,6 +89,23 @@ data class ApiPage<T>(
     val hasMore: Boolean
 )
 
+data class AuthUser(
+    val id: String,
+    val email: String,
+    val firstName: String,
+    val lastName: String,
+    val name: String,
+    val country: String,
+    val createdAt: String,
+    val favoriteAppIds: List<String> = emptyList(),
+    val libraryAppIds: List<String> = emptyList()
+)
+
+data class AuthSession(
+    val token: String,
+    val user: AuthUser
+)
+
 fun tr(ru: String, en: String): String {
     return if (Locale.getDefault().language.lowercase().startsWith("ru")) ru else en
 }

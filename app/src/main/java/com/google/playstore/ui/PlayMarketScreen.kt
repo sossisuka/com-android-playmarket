@@ -1,8 +1,12 @@
 ﻿package com.google.playstore.ui
 
 import android.content.Intent
+import android.net.Uri
 import android.view.ContextThemeWrapper
+import android.widget.ImageView
 import android.widget.ProgressBar
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -25,6 +29,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -57,6 +62,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -79,6 +85,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -93,6 +101,7 @@ import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import com.google.playstore.BuildConfig
 import com.google.playstore.R
+import com.google.playstore.data.AuthSessionStore
 import com.google.playstore.data.PlayApiClient
 import com.google.playstore.model.CatalogMode
 import com.google.playstore.model.DrawerSection
@@ -112,6 +121,8 @@ import kotlinx.coroutines.withContext
 @Composable
 fun PlayMarketScreen() {
     var apps by remember { mutableStateOf<List<StoreApp>>(emptyList()) }
+    var fullCatalogLoaded by rememberSaveable { mutableStateOf(false) }
+    var fullCatalogLoading by remember { mutableStateOf(false) }
     var homePayload by remember { mutableStateOf<HomePayload?>(null) }
     var loading by remember { mutableStateOf(true) }
     var loadingDetails by remember { mutableStateOf(false) }
@@ -120,14 +131,23 @@ fun PlayMarketScreen() {
     var catalogMode by rememberSaveable { mutableStateOf(CatalogMode.Apps) }
     var selectedApp by remember { mutableStateOf<StoreApp?>(null) }
     var selectedCategory by rememberSaveable { mutableStateOf<String?>(null) }
+    var showInstalledPackages by rememberSaveable { mutableStateOf(false) }
     var searchMode by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    var authMode by rememberSaveable { mutableStateOf<LegacyAuthMode?>(null) }
+    var authToken by rememberSaveable { mutableStateOf<String?>(null) }
+    var signedInName by rememberSaveable { mutableStateOf<String?>(null) }
+    var signedInEmail by rememberSaveable { mutableStateOf<String?>(null) }
+    var authInProgress by remember { mutableStateOf(false) }
     var wishlistAppIds by rememberSaveable { mutableStateOf(setOf<String>()) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val apiClient = remember { PlayApiClient(BuildConfig.PLAY_API_BASE_URL) }
     val context = LocalContext.current
-    val headerSearchMode = searchMode && selectedApp == null
+    val authSessionStore = remember(context.applicationContext) {
+        AuthSessionStore(context.applicationContext)
+    }
+    val headerSearchMode = searchMode && selectedApp == null && authMode == null
 
     LaunchedEffect(Unit) {
         runCatching {
@@ -143,6 +163,26 @@ fun PlayMarketScreen() {
         }
     }
 
+    LaunchedEffect(showInstalledPackages) {
+        if (!showInstalledPackages || fullCatalogLoaded || fullCatalogLoading) return@LaunchedEffect
+        fullCatalogLoading = true
+        runCatching {
+            withContext(Dispatchers.IO) {
+                apiClient.readAllSummariesPaged(pageLimit = 1000)
+            }
+        }.onSuccess { fetched ->
+            val merged = LinkedHashMap<String, StoreApp>(apps.size + fetched.size)
+            apps.forEach { merged[it.id] = it }
+            fetched.forEach { merged[it.id] = it }
+            apps = merged.values.toList()
+            fullCatalogLoaded = true
+        }.onFailure {
+            // Keep current list; clicking package can still lazy-load details by id.
+        }.also {
+            fullCatalogLoading = false
+        }
+    }
+
     LaunchedEffect(catalogMode) {
         val mode = when (catalogMode) {
             CatalogMode.Apps -> "apps"
@@ -154,6 +194,27 @@ fun PlayMarketScreen() {
             homePayload = it
         }.onFailure {
             if (homePayload == null) error = it.message
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val storedToken = authSessionStore.readToken()
+        if (storedToken.isBlank()) return@LaunchedEffect
+        runCatching {
+            withContext(Dispatchers.IO) {
+                apiClient.readCurrentUser(storedToken)
+            }
+        }.onSuccess { user ->
+            authToken = storedToken
+            signedInName = user.name
+            signedInEmail = user.email
+            wishlistAppIds = user.favoriteAppIds.toSet()
+        }.onFailure {
+            authSessionStore.clear()
+            authToken = null
+            signedInName = null
+            signedInEmail = null
+            wishlistAppIds = emptySet()
         }
     }
 
@@ -176,37 +237,84 @@ fun PlayMarketScreen() {
             loadingDetails = false
         }
     }
+    val openAuthScreen: (LegacyAuthMode) -> Unit = { mode ->
+        authMode = mode
+        selectedApp = null
+        selectedCategory = null
+        showInstalledPackages = false
+        searchMode = false
+        searchQuery = ""
+        scope.launch { drawerState.close() }
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
             LegacyLeftDrawer(
+                signedInName = signedInName,
+                signedInEmail = signedInEmail,
                 onItemClick = { section ->
                     when (section) {
+                        DrawerSection.MyApps -> {
+                            showInstalledPackages = true
+                            catalogMode = CatalogMode.Apps
+                            tab = HomeTab.Home
+                            selectedCategory = null
+                        }
                         DrawerSection.Games -> {
+                            showInstalledPackages = false
                             catalogMode = CatalogMode.Games
                             tab = HomeTab.Home
                             selectedCategory = null
                         }
                         DrawerSection.Categories -> {
+                            showInstalledPackages = false
                             catalogMode = CatalogMode.Apps
                             tab = HomeTab.Categories
                             selectedCategory = null
                         }
                         else -> {
+                            showInstalledPackages = false
                             catalogMode = CatalogMode.Apps
                             tab = HomeTab.Home
                             selectedCategory = null
                         }
                     }
                     selectedApp = null
+                    authMode = null
                     searchMode = false
                     searchQuery = ""
                     scope.launch { drawerState.close() }
+                },
+                onSignInClick = { openAuthScreen(LegacyAuthMode.SignIn) },
+                onRegisterClick = { openAuthScreen(LegacyAuthMode.Register) },
+                onLogoutClick = {
+                    val token = authToken.orEmpty()
+                    authMode = null
+                    if (token.isBlank()) {
+                        authSessionStore.clear()
+                        authToken = null
+                        signedInName = null
+                        signedInEmail = null
+                        wishlistAppIds = emptySet()
+                        scope.launch { drawerState.close() }
+                    } else {
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) { apiClient.logout(token) }
+                            }
+                            authSessionStore.clear()
+                            authToken = null
+                            signedInName = null
+                            signedInEmail = null
+                            wishlistAppIds = emptySet()
+                            drawerState.close()
+                        }
+                    }
                 }
             )
         },
-        gesturesEnabled = selectedApp == null && !searchMode
+        gesturesEnabled = selectedApp == null && !searchMode && authMode == null
     ) {
         Column(
             modifier = Modifier
@@ -216,15 +324,21 @@ fun PlayMarketScreen() {
             if (!loading) {
                 LegacyTopBar(
                     title = selectedApp?.name
+                        ?: when (authMode) {
+                            LegacyAuthMode.SignIn -> stringResource(R.string.auth_sign_in_title)
+                            LegacyAuthMode.Register -> stringResource(R.string.auth_register_title)
+                            null -> null
+                        }
+                        ?: if (showInstalledPackages) stringResource(R.string.my_downloads_menu) else null
                         ?: selectedCategory?.let { categoryLabelRu(it) }
                         ?: if (catalogMode == CatalogMode.Games) stringResource(R.string.games_corpus_title) else stringResource(R.string.apps_title),
-                    showBack = selectedApp != null || selectedCategory != null || searchMode,
-                    appPageMode = selectedApp != null || selectedCategory != null,
+                    showBack = selectedApp != null || selectedCategory != null || showInstalledPackages || searchMode || authMode != null,
+                    appPageMode = selectedApp != null || selectedCategory != null || showInstalledPackages || authMode != null,
                     showAppHeaderActions = selectedApp != null,
                     searchMode = headerSearchMode,
                     searchQuery = searchQuery,
                     onSearchQueryChange = { searchQuery = it },
-                    onSearchClick = { if (selectedApp == null) searchMode = true },
+                    onSearchClick = { if (selectedApp == null && authMode == null && !showInstalledPackages) searchMode = true },
                     wishlistSelected = selectedApp?.id?.let { it in wishlistAppIds } == true,
                     onWishlistClick = {
                         val appId = selectedApp?.id ?: return@LegacyTopBar
@@ -249,6 +363,8 @@ fun PlayMarketScreen() {
                     onLeftClick = {
                         when {
                             selectedApp != null -> selectedApp = null
+                            authMode != null -> authMode = null
+                            showInstalledPackages -> showInstalledPackages = false
                             selectedCategory != null -> selectedCategory = null
                             searchMode -> {
                                 searchMode = false
@@ -262,11 +378,52 @@ fun PlayMarketScreen() {
 
             when {
                 loading -> InitialLoadingScreen()
+                authMode != null -> LegacyAuthPage(
+                    mode = authMode!!,
+                    signedInName = signedInName,
+                    signedInEmail = signedInEmail,
+                    loading = authInProgress,
+                    onCancel = { authMode = null },
+                    onSubmit = { mode, firstName, lastName, email, password ->
+                        authInProgress = true
+                        try {
+                            val session = withContext(Dispatchers.IO) {
+                                if (mode == LegacyAuthMode.SignIn) {
+                                    apiClient.login(email = email, password = password)
+                                } else {
+                                    apiClient.register(
+                                        email = email,
+                                        password = password,
+                                        firstName = firstName,
+                                        lastName = lastName,
+                                        country = Locale.getDefault().country
+                                    )
+                                }
+                            }
+                            authSessionStore.saveToken(session.token)
+                            authToken = session.token
+                            signedInName = session.user.name
+                            signedInEmail = session.user.email
+                            wishlistAppIds = session.user.favoriteAppIds.toSet()
+                            authMode = null
+                        } finally {
+                            authInProgress = false
+                        }
+                    },
+                    onSwitchMode = { authMode = it }
+                )
                 error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("Ошибка загрузки данных API\n$error", color = Color(0xFF333333), fontSize = 14.sp)
                 }
                 else -> Box(Modifier.fillMaxSize()) {
-                    if (searchMode) {
+                    if (showInstalledPackages) {
+                        InstalledPackagesPage(
+                            apiClient = apiClient,
+                            storeApps = apps,
+                            loadingCatalog = fullCatalogLoading,
+                            onAppClick = onAppClick
+                        )
+                    } else if (searchMode) {
                         SearchResultsPage(
                             query = searchQuery,
                             apiClient = apiClient,
@@ -389,20 +546,32 @@ private fun MainTabsPager(
     }
 }
 
+private enum class LegacyAuthMode { SignIn, Register }
+
 @Composable
-private fun LegacyLeftDrawer(onItemClick: (DrawerSection) -> Unit) {
-    val menuItems = listOf(
-        Triple(DrawerSection.Home, R.string.drawer_home, R.mipmap.ic_menu_play),
-        Triple(DrawerSection.MyApps, R.string.my_downloads_menu, R.drawable.ic_menu_market_myapps),
-        Triple(DrawerSection.Games, R.string.games_corpus_title, R.mipmap.ic_menu_apps),
-        Triple(DrawerSection.Categories, R.string.category_tab_title, R.mipmap.ic_menu_apps),
-        Triple(DrawerSection.Editors, R.string.drawer_editors_choice, R.drawable.ic_menu_market_wishlist),
-        Triple(DrawerSection.Settings, R.string.settings, R.drawable.ic_menu_market_settings)
-    )
+private fun LegacyLeftDrawer(
+    signedInName: String?,
+    signedInEmail: String?,
+    onItemClick: (DrawerSection) -> Unit,
+    onSignInClick: () -> Unit,
+    onRegisterClick: () -> Unit,
+    onLogoutClick: () -> Unit
+) {
+    val menuItems = buildList {
+        add(Triple(DrawerSection.Home, R.string.drawer_home, R.mipmap.ic_menu_play))
+        add(Triple(DrawerSection.MyApps, R.string.my_downloads_menu, R.drawable.ic_menu_market_myapps))
+        add(Triple(DrawerSection.Games, R.string.games_corpus_title, R.drawable.ic_menu_games_dark))
+        add(Triple(DrawerSection.Categories, R.string.category_tab_title, R.drawable.ic_menu_shop_holo_dark))
+        add(Triple(DrawerSection.Settings, R.string.settings, R.drawable.ic_menu_market_settings))
+        if (!signedInEmail.isNullOrBlank()) {
+            add(Triple(DrawerSection.Editors, R.string.menu_my_wishlist, R.drawable.ic_menu_market_wishlist))
+        }
+    }
 
     ModalDrawerSheet(
         drawerContainerColor = Color(0xFFF5F5F5),
         drawerShape = RoundedCornerShape(0.dp),
+        windowInsets = WindowInsets(0, 0, 0, 0),
         modifier = Modifier.width(284.dp).statusBarsPadding()
     ) {
         Row(
@@ -417,6 +586,14 @@ private fun LegacyLeftDrawer(onItemClick: (DrawerSection) -> Unit) {
             Spacer(Modifier.width(8.dp))
             Text(stringResource(R.string.launcher_name), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
+        LegacyDrawerAccountPanel(
+            signedInName = signedInName,
+            signedInEmail = signedInEmail,
+            onSignInClick = onSignInClick,
+            onRegisterClick = onRegisterClick,
+            onLogoutClick = onLogoutClick
+        )
+        HorizontalDivider(color = Color(0x12000000))
         menuItems.forEach { (section, title, iconRes) ->
             Row(
                 modifier = Modifier
@@ -430,13 +607,509 @@ private fun LegacyLeftDrawer(onItemClick: (DrawerSection) -> Unit) {
                 Image(
                     painter = painterResource(iconRes),
                     contentDescription = null,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(20.dp),
+                    colorFilter = if (section == DrawerSection.MyApps || section == DrawerSection.Categories) {
+                        androidx.compose.ui.graphics.ColorFilter.tint(Color(0xFF4A4A4A))
+                    } else {
+                        null
+                    }
                 )
                 Spacer(Modifier.width(14.dp))
                 Text(stringResource(title), color = Color(0xFF3F3F3F), fontSize = 15.sp)
             }
             HorizontalDivider(color = Color(0x12000000))
         }
+    }
+}
+
+@Composable
+private fun LegacyDrawerAccountPanel(
+    signedInName: String?,
+    signedInEmail: String?,
+    onSignInClick: () -> Unit,
+    onRegisterClick: () -> Unit,
+    onLogoutClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF5F5F5))
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = stringResource(R.string.account_required_external),
+            color = Color(0xFF6C6C6C),
+            fontSize = 12.sp,
+            lineHeight = 17.sp
+        )
+        if (!signedInEmail.isNullOrBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White)
+                    .border(1.dp, Color(0x18000000))
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Image(
+                    painter = painterResource(R.mipmap.ic_menu_play_store),
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = stringResource(R.string.auth_signed_in_as),
+                        color = Color(0xFF9A9A9A),
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        text = signedInName?.takeIf { it.isNotBlank() } ?: signedInEmail,
+                        color = Color(0xFF404040),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (!signedInName.isNullOrBlank()) {
+                        Text(
+                            text = signedInEmail,
+                            color = Color(0xFF737373),
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+        if (signedInEmail.isNullOrBlank()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LegacyDrawerAuthButton(
+                    label = stringResource(R.string.no_recommendation_account),
+                    filled = true,
+                    modifier = Modifier.weight(1f),
+                    onClick = onSignInClick
+                )
+                LegacyDrawerAuthButton(
+                    label = stringResource(R.string.auth_create_account_action),
+                    filled = false,
+                    modifier = Modifier.weight(1f),
+                    onClick = onRegisterClick
+                )
+            }
+        } else {
+            LegacyDrawerAuthButton(
+                label = stringResource(R.string.auth_sign_out),
+                filled = false,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onLogoutClick
+            )
+        }
+    }
+}
+
+@Composable
+private fun LegacyDrawerAuthButton(
+    label: String,
+    filled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .height(38.dp)
+            .background(if (filled) Color(0xFF97B52C) else Color.White)
+            .border(1.dp, if (filled) Color(0xFF97B52C) else Color(0x26000000))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label.uppercase(Locale.getDefault()),
+            color = if (filled) Color.White else Color(0xFF4A4A4A),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun LegacyAuthPage(
+    mode: LegacyAuthMode,
+    signedInName: String?,
+    signedInEmail: String?,
+    loading: Boolean,
+    onCancel: () -> Unit,
+    onSubmit: suspend (
+        mode: LegacyAuthMode,
+        firstName: String,
+        lastName: String,
+        email: String,
+        password: String
+    ) -> Unit,
+    onSwitchMode: (LegacyAuthMode) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val initialName = signedInName.orEmpty().trim()
+    val initialFirstName = initialName.substringBefore(' ', missingDelimiterValue = initialName)
+    val initialLastName = initialName.substringAfter(' ', missingDelimiterValue = "")
+    var firstName by rememberSaveable(mode, signedInName) { mutableStateOf(initialFirstName) }
+    var lastName by rememberSaveable(mode, signedInName) { mutableStateOf(initialLastName) }
+    var email by rememberSaveable(mode, signedInEmail) { mutableStateOf(signedInEmail.orEmpty()) }
+    var password by rememberSaveable(mode) { mutableStateOf("") }
+    var confirmPassword by rememberSaveable(mode) { mutableStateOf("") }
+    var validationMessage by remember(mode) { mutableStateOf<String?>(null) }
+    val isSignIn = mode == LegacyAuthMode.SignIn
+    val title = if (isSignIn) {
+        stringResource(R.string.select_account)
+    } else {
+        stringResource(R.string.auth_register_title)
+    }
+    val subtitle = if (isSignIn) {
+        stringResource(R.string.account_required_external)
+    } else {
+        stringResource(R.string.auth_register_subtitle)
+    }
+    val primaryActionLabel = if (isSignIn) {
+        stringResource(R.string.no_recommendation_account)
+    } else {
+        stringResource(R.string.auth_create_account_action)
+    }
+    val switchPrompt = if (isSignIn) {
+        stringResource(R.string.auth_need_google_account)
+    } else {
+        stringResource(R.string.auth_have_google_account)
+    }
+    val switchAction = if (isSignIn) {
+        stringResource(R.string.auth_create_account_action)
+    } else {
+        stringResource(R.string.no_recommendation_account)
+    }
+    val invalidEmailMessage = stringResource(R.string.invalid_email)
+    val emptyPasswordMessage = stringResource(R.string.enter_a_password)
+    val fillRequiredMessage = stringResource(R.string.auth_fill_required)
+    val passwordMismatchMessage = stringResource(R.string.auth_password_mismatch)
+    val canSubmit = if (isSignIn) {
+        email.trim().isNotBlank() && password.isNotBlank()
+    } else {
+        firstName.trim().isNotBlank() &&
+            lastName.trim().isNotBlank() &&
+            email.trim().isNotBlank() &&
+            password.isNotBlank() &&
+            confirmPassword.isNotBlank() &&
+            password == confirmPassword
+    } && !loading
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.White)
+    ) {
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item {
+                Text(
+                    text = title,
+                    color = Color(0xFF303030),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Normal
+                )
+            }
+            item {
+                Text(
+                    text = subtitle,
+                    color = Color(0xFF999999),
+                    fontSize = 14.sp,
+                    lineHeight = 18.sp
+                )
+            }
+            if (!signedInEmail.isNullOrBlank() && isSignIn) {
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFFF4F4F4))
+                            .border(1.dp, Color(0x15000000))
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.auth_signed_in_as),
+                            color = Color(0xFF8F8F8F),
+                            fontSize = 11.sp
+                        )
+                        Text(
+                            text = signedInName?.takeIf { it.isNotBlank() } ?: signedInEmail,
+                            color = Color(0xFF404040),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        if (!signedInName.isNullOrBlank()) {
+                            Text(
+                                text = signedInEmail,
+                                color = Color(0xFF767676),
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+            }
+            if (!isSignIn) {
+                item {
+                    LegacyAuthInput(
+                        value = firstName,
+                        onValueChange = {
+                            firstName = it
+                            validationMessage = null
+                        },
+                        hint = stringResource(R.string.first_name),
+                        keyboardType = KeyboardType.Text
+                    )
+                }
+                item {
+                    LegacyAuthInput(
+                        value = lastName,
+                        onValueChange = {
+                            lastName = it
+                            validationMessage = null
+                        },
+                        hint = stringResource(R.string.last_name),
+                        keyboardType = KeyboardType.Text
+                    )
+                }
+            }
+            item {
+                LegacyAuthInput(
+                    value = email,
+                    onValueChange = {
+                        email = it
+                        validationMessage = null
+                    },
+                    hint = stringResource(R.string.email_address),
+                    keyboardType = KeyboardType.Email
+                )
+            }
+            item {
+                LegacyAuthInput(
+                    value = password,
+                    onValueChange = {
+                        password = it
+                        validationMessage = null
+                    },
+                    hint = stringResource(R.string.google_password_hint),
+                    keyboardType = KeyboardType.Password,
+                    isPassword = true
+                )
+            }
+            if (!isSignIn) {
+                item {
+                    LegacyAuthInput(
+                        value = confirmPassword,
+                        onValueChange = {
+                            confirmPassword = it
+                            validationMessage = null
+                        },
+                        hint = stringResource(R.string.auth_confirm_password),
+                        keyboardType = KeyboardType.Password,
+                        isPassword = true
+                    )
+                }
+            }
+            if (!validationMessage.isNullOrBlank()) {
+                item {
+                    Text(
+                        text = validationMessage!!,
+                        color = Color(0xFFC14F42),
+                        fontSize = 12.sp
+                    )
+                }
+            }
+            if (!isSignIn && confirmPassword.isNotBlank() && password != confirmPassword) {
+                item {
+                    Text(
+                        text = passwordMismatchMessage,
+                        color = Color(0xFFC14F42),
+                        fontSize = 12.sp
+                    )
+                }
+            }
+            if (isSignIn) {
+                item {
+                    Text(
+                        text = stringResource(R.string.forgot_your_password),
+                        color = Color(0xFF3B78B6),
+                        fontSize = 14.sp
+                    )
+                }
+            }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = switchPrompt,
+                        color = Color(0xFF8D8D8D),
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = switchAction,
+                        color = Color(0xFF3B78B6),
+                        fontSize = 14.sp,
+                        modifier = Modifier.clickable {
+                            if (loading) return@clickable
+                            validationMessage = null
+                            onSwitchMode(if (isSignIn) LegacyAuthMode.Register else LegacyAuthMode.SignIn)
+                        }
+                    )
+                }
+            }
+        }
+        LegacyAuthButtonBar(
+            positiveLabel = primaryActionLabel,
+            negativeLabel = stringResource(R.string.cancel),
+            positiveEnabled = canSubmit,
+            onPositiveClick = {
+                val trimmedEmail = email.trim()
+                val isEmailValid = trimmedEmail.contains('@') && trimmedEmail.contains('.')
+                validationMessage = when {
+                    !isEmailValid -> invalidEmailMessage
+                    password.isBlank() -> emptyPasswordMessage
+                    !isSignIn && (firstName.isBlank() || lastName.isBlank() || confirmPassword.isBlank()) -> fillRequiredMessage
+                    !isSignIn && password != confirmPassword -> passwordMismatchMessage
+                    else -> null
+                }
+                if (validationMessage == null) {
+                    scope.launch {
+                        val failure = runCatching {
+                            onSubmit(
+                                mode,
+                                firstName.trim(),
+                                lastName.trim(),
+                                trimmedEmail,
+                                password
+                            )
+                        }.exceptionOrNull()
+                        validationMessage = failure?.message
+                    }
+                }
+            },
+            onNegativeClick = {
+                if (!loading) onCancel()
+            }
+        )
+    }
+}
+
+@Composable
+private fun LegacyAuthInput(
+    value: String,
+    onValueChange: (String) -> Unit,
+    hint: String,
+    keyboardType: KeyboardType,
+    isPassword: Boolean = false
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White)
+            .border(1.dp, Color(0x26000000))
+            .padding(horizontal = 12.dp, vertical = 12.dp)
+    ) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            textStyle = TextStyle(
+                color = Color(0xFF343434),
+                fontSize = 18.sp
+            ),
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrectEnabled = false,
+                keyboardType = keyboardType,
+                imeAction = ImeAction.Next
+            ),
+            visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
+            modifier = Modifier.fillMaxWidth(),
+            decorationBox = { inner ->
+                if (value.isBlank()) {
+                    Text(
+                        text = hint,
+                        color = Color(0xFF9B9B9B),
+                        fontSize = 18.sp
+                    )
+                }
+                inner()
+            }
+        )
+    }
+}
+
+@Composable
+private fun LegacyAuthButtonBar(
+    positiveLabel: String,
+    negativeLabel: String,
+    positiveEnabled: Boolean,
+    onPositiveClick: () -> Unit,
+    onNegativeClick: () -> Unit
+) {
+    HorizontalDivider(color = Color(0x16000000))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF1F1F1))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        LegacyAuthButtonBarButton(
+            label = positiveLabel,
+            filled = true,
+            enabled = positiveEnabled,
+            modifier = Modifier.weight(1f),
+            onClick = onPositiveClick
+        )
+        LegacyAuthButtonBarButton(
+            label = negativeLabel,
+            filled = false,
+            enabled = true,
+            modifier = Modifier.weight(1f),
+            onClick = onNegativeClick
+        )
+    }
+}
+
+@Composable
+private fun LegacyAuthButtonBarButton(
+    label: String,
+    filled: Boolean,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .height(42.dp)
+            .background(
+                when {
+                    filled && enabled -> Color(0xFF97B52C)
+                    filled -> Color(0xFFD0D0D0)
+                    else -> Color.White
+                }
+            )
+            .border(1.dp, if (filled) Color(0x26000000) else Color(0x30000000))
+            .clickable(enabled = enabled) { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label.uppercase(Locale.getDefault()),
+            color = if (filled && enabled) Color.White else Color(0xFF4A4A4A),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1
+        )
     }
 }
 
@@ -639,6 +1312,201 @@ private fun MainContent(
         HomeTab.TopNewPaid -> PagedChartPage(localizeSectionTitle("Top New Paid"), "top_new_paid", apiClient, catalogMode, onAppClick, style = ChartCardStyle.GrossingBlend, showHeader = false)
         HomeTab.TopNewFree -> PagedChartPage(localizeSectionTitle("Top New Free"), "top_new_free", apiClient, catalogMode, onAppClick, style = ChartCardStyle.GrossingBlend, showHeader = false)
     }
+}
+
+private data class InstalledPackageEntry(
+    val packageName: String,
+    val displayName: String,
+    val app: StoreApp?
+)
+
+@Composable
+private fun InstalledPackagesPage(
+    apiClient: PlayApiClient,
+    storeApps: List<StoreApp>,
+    loadingCatalog: Boolean,
+    onAppClick: (StoreApp) -> Unit
+) {
+    val context = LocalContext.current
+    val packageManager = context.packageManager
+    val packages = remember(storeApps, context) {
+        val appsById = storeApps.associateBy { it.id.trim().lowercase(Locale.ROOT) }
+        runCatching {
+            packageManager.getInstalledPackages(0)
+                .asSequence()
+                .mapNotNull { pkg ->
+                    val packageName = pkg.packageName?.trim().orEmpty()
+                    if (packageName.isBlank()) return@mapNotNull null
+                    if (packageManager.getLaunchIntentForPackage(packageName) == null) return@mapNotNull null
+                    val label = runCatching {
+                        val appInfo = packageManager.getApplicationInfo(packageName, 0)
+                        packageManager.getApplicationLabel(appInfo).toString().trim()
+                    }.getOrDefault("")
+                    InstalledPackageEntry(
+                        packageName = packageName,
+                        displayName = label.ifBlank { packageName },
+                        app = appsById[packageName.lowercase(Locale.ROOT)]
+                    )
+                }
+                .sortedWith(
+                    compareBy<InstalledPackageEntry>(
+                        { it.displayName.lowercase(Locale.getDefault()) },
+                        { it.packageName.lowercase(Locale.getDefault()) }
+                    )
+                )
+                .toList()
+        }.getOrDefault(emptyList())
+    }
+    var apiResolvedApps by remember { mutableStateOf<Map<String, StoreApp?>>(emptyMap()) }
+
+    LaunchedEffect(packages) {
+        val missingPackageNames = packages
+            .asSequence()
+            .filter { it.app == null }
+            .map { it.packageName }
+            .filter { !apiResolvedApps.containsKey(it) }
+            .toList()
+        for (packageName in missingPackageNames) {
+            val resolved = runCatching {
+                withContext(Dispatchers.IO) { apiClient.readById(packageName) }
+            }.getOrNull()
+            apiResolvedApps = apiResolvedApps + (packageName to resolved)
+        }
+    }
+
+    if (packages.isEmpty()) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = stringResource(R.string.empty_myapps_description_installed),
+                color = Color(0xFF6A6A6A),
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 20.dp)
+            )
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        if (loadingCatalog) {
+            item(key = "catalog_loading_hint") {
+                Text(
+                    text = tr("Синхронизация каталога…", "Syncing catalog…"),
+                    color = Color(0xFF7C7C7C),
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.White)
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                )
+            }
+        }
+        items(packages, key = { it.packageName }) { item ->
+            val resolvedApp = item.app ?: apiResolvedApps[item.packageName]
+            InstalledPackageListItem(
+                item = item,
+                apiApp = resolvedApp,
+                onClick = {
+                    val matched = resolvedApp
+                    if (matched != null) {
+                        onAppClick(matched)
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun InstalledPackageListItem(
+    item: InstalledPackageEntry,
+    apiApp: StoreApp?,
+    onClick: (() -> Unit)?
+) {
+    val baseModifier = Modifier
+        .fillMaxWidth()
+        .heightIn(min = 74.dp)
+        .background(Color.White)
+        .padding(horizontal = 10.dp, vertical = 8.dp)
+    Row(
+        modifier = if (onClick != null) baseModifier.clickable { onClick() } else baseModifier,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (apiApp != null) {
+            AppIconImage(apiApp.iconUrl, 48.dp, cornerRadius = 9.dp)
+        } else {
+            val context = LocalContext.current
+            val packageManager = context.packageManager
+            val packageIcon = remember(item.packageName) {
+                runCatching { packageManager.getApplicationIcon(item.packageName) }.getOrNull()
+            }
+            if (packageIcon != null) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(Color.White),
+                    contentAlignment = Alignment.Center
+                ) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            ImageView(ctx).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+                        },
+                        update = { view -> view.setImageDrawable(packageIcon) }
+                    )
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(Color(0xFFE0E0E0), RoundedCornerShape(9.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        painter = painterResource(R.mipmap.ic_menu_play_store),
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 10.dp, end = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                text = item.displayName,
+                color = Color(0xFF2F2F2F),
+                fontSize = 15.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = item.packageName,
+                color = Color(0xFF808080),
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            text = stringResource(R.string.installed_list_state).uppercase(Locale.getDefault()),
+            color = Color(0xFF96B62A),
+            fontSize = 10.sp,
+            maxLines = 1
+        )
+    }
+    HorizontalDivider(color = Color(0x12000000), modifier = Modifier.padding(start = 68.dp))
 }
 
 private enum class ChartCardStyle { Classic, GrossingBlend }
@@ -1255,16 +2123,53 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
     val context = LocalContext.current
     val packageManager = context.packageManager
     val uriHandler = LocalUriHandler.current
-    val screenshots = app.screenshots.ifEmpty { if (app.iconUrl.isBlank()) emptyList() else listOf(app.iconUrl) }
+    val screenshots = remember(app.id, app.screenshots, app.iconUrl) {
+        app.screenshots
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .ifEmpty { if (app.iconUrl.isBlank()) emptyList() else listOf(app.iconUrl) }
+    }
+    val hasTrailer = app.trailerImageUrl.isNotBlank()
+    val infiniteScreenshots = screenshots.size > 1
+    val infiniteScreenshotsVirtualCount = 1_000_000
+    val screenshotsVirtualCount = if (infiniteScreenshots) {
+        infiniteScreenshotsVirtualCount
+    } else {
+        screenshots.size
+    }
+    val screenshotsStartIndex = remember(screenshots.size, hasTrailer, screenshotsVirtualCount) {
+        if (!infiniteScreenshots) {
+            0
+        } else if (hasTrailer) {
+            // Keep trailer visible at the beginning when it exists.
+            0
+        } else {
+            val middle = screenshotsVirtualCount / 2
+            val alignedMiddle = middle - (middle % screenshots.size)
+            alignedMiddle
+        }
+    }
+    val screenshotsListState = remember(app.id, screenshotsStartIndex) {
+        LazyListState(firstVisibleItemIndex = screenshotsStartIndex)
+    }
     val descriptionText = app.descriptionBlocks.joinToString("\n\n").ifBlank { app.subtitle.ifBlank { "Описание отсутствует" } }
     val whatsNewText = app.whatsNew.joinToString("\n").ifBlank { "" }
     val similarApps = remember(app.similarAppIds, catalogApps) { app.similarAppIds.mapNotNull { id -> catalogApps.firstOrNull { it.id == id } } }
     val moreFromDeveloper = remember(app.moreFromDeveloperIds, catalogApps) { app.moreFromDeveloperIds.mapNotNull { id -> catalogApps.firstOrNull { it.id == id } } }
-    val launchIntent = remember(packageManager, app.id) { packageManager.getLaunchIntentForPackage(app.id) }
-    val isInstalledOnDevice = remember(context, app.id, launchIntent) {
+    var installStateRefreshKey by rememberSaveable(app.id) { mutableIntStateOf(0) }
+    val launchIntent = remember(packageManager, app.id, installStateRefreshKey) {
+        packageManager.getLaunchIntentForPackage(app.id)
+    }
+    val isInstalledOnDevice = remember(context, app.id, launchIntent, installStateRefreshKey) {
         isAppInstalledOnDevice(context, app.id) || launchIntent != null
     }
+    val uninstallLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        installStateRefreshKey += 1
+    }
     var showInstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
+    var showUninstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var fullscreenShotIndex by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
     var installProgress by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
 
@@ -1278,6 +2183,28 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
             onInstall = {
                 showInstallDialog = false
                 installProgress = -1
+            }
+        )
+    }
+    if (showUninstallDialog) {
+        LegacyUninstallConfirmDialog(
+            appName = app.name,
+            onDismiss = { showUninstallDialog = false },
+            onUninstall = {
+                showUninstallDialog = false
+                val uninstallIntent = Intent(Intent.ACTION_DELETE).apply {
+                    data = Uri.parse("package:${app.id}")
+                    putExtra(Intent.EXTRA_RETURN_RESULT, true)
+                }
+                runCatching {
+                    uninstallLauncher.launch(uninstallIntent)
+                }.onFailure {
+                    val fallbackIntent = Intent(Intent.ACTION_DELETE).apply {
+                        data = Uri.parse("package:${app.id}")
+                    }
+                    runCatching { context.startActivity(fallbackIntent) }
+                    installStateRefreshKey += 1
+                }
             }
         )
     }
@@ -1338,7 +2265,7 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.Top
                 ) {
                     Box(
                         modifier = Modifier
@@ -1382,34 +2309,66 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
                             )
                         }
                     }
-                    Column(horizontalAlignment = Alignment.End) {
-                        if (app.isFree) {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.Top)
+                            .padding(top = 2.dp),
+                        horizontalAlignment = Alignment.End
+                    ) {
+                        if (app.isFree && !isInstalledOnDevice) {
                             Text(priceLabelForUi(app), color = Color(0xFF7C7C7C), fontSize = 15.sp)
                             Spacer(Modifier.height(6.dp))
                         }
                         if (installProgress == null) {
-                            Box(
-                                Modifier
-                                    .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
-                                    .clickable {
-                                        if (isInstalledOnDevice && launchIntent != null) {
-                                            context.startActivity(launchIntent)
-                                        } else {
-                                            showInstallDialog = true
+                            val detailsActionButtonModifier = Modifier
+                                .width(122.dp)
+                                .height(40.dp)
+                            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Box(
+                                    detailsActionButtonModifier
+                                        .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
+                                        .clickable {
+                                            if (isInstalledOnDevice && launchIntent != null) {
+                                                context.startActivity(launchIntent)
+                                            } else if (!isInstalledOnDevice) {
+                                                showInstallDialog = true
+                                            }
                                         }
+                                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = when {
+                                            isInstalledOnDevice -> stringResource(R.string.open).uppercase(Locale.getDefault())
+                                            app.isFree -> stringResource(R.string.install).uppercase(Locale.getDefault())
+                                            else -> priceLabelForUi(app)
+                                        },
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                                if (isInstalledOnDevice) {
+                                    Row(
+                                        modifier = detailsActionButtonModifier
+                                            .background(Color.White)
+                                            .border(1.dp, Color(0x14000000))
+                                            .clickable { showUninstallDialog = true }
+                                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            stringResource(R.string.uninstall).uppercase(Locale.getDefault()),
+                                            color = Color(0xFF666666),
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            textAlign = TextAlign.Center
+                                        )
                                     }
-                                    .padding(horizontal = 14.dp, vertical = 7.dp)
-                            ) {
-                                Text(
-                                    text = when {
-                                        isInstalledOnDevice -> stringResource(R.string.open).uppercase(Locale.getDefault())
-                                        app.isFree -> stringResource(R.string.install).uppercase(Locale.getDefault())
-                                        else -> priceLabelForUi(app)
-                                    },
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                }
                             }
                         } else {
                             Row(
@@ -1467,10 +2426,11 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
                     }
                 } else {
                     LazyRow(
+                        state = screenshotsListState,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         contentPadding = PaddingValues(horizontal = 10.dp)
                     ) {
-                        if (app.trailerImageUrl.isNotBlank()) {
+                        if (hasTrailer) {
                             item {
                                 AdaptiveMediaCard(
                                     imageUrl = app.trailerImageUrl,
@@ -1483,14 +2443,16 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
                                 )
                             }
                         }
-                        itemsIndexed(screenshots) { index, shot ->
+                        items(count = screenshotsVirtualCount) { index ->
+                            val screenshotIndex = if (screenshots.isEmpty()) 0 else index % screenshots.size
+                            val shot = screenshots.getOrNull(screenshotIndex) ?: return@items
                             AdaptiveMediaCard(
                                 imageUrl = shot,
                                 height = 180.dp,
                                 defaultRatio = 0.58f,
                                 minRatio = 0.52f,
                                 maxRatio = 1.85f,
-                                onClick = { fullscreenShotIndex = index }
+                                onClick = { fullscreenShotIndex = screenshotIndex }
                             )
                         }
                     }
@@ -1715,7 +2677,7 @@ private fun FullscreenScreenshotViewer(
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
-                key = { page -> images[page] }
+                key = { page -> page }
             ) { page ->
                 AsyncImage(
                     model = images[page],
@@ -1756,9 +2718,11 @@ private fun FullscreenScreenshotViewer(
 private fun DetailsSmallAction(iconRes: Int, label: String, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier
+            .fillMaxWidth()
             .background(Color(0xFFF8F8F8))
             .border(1.dp, Color(0x12000000))
             .padding(horizontal = 8.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Image(
@@ -1768,7 +2732,14 @@ private fun DetailsSmallAction(iconRes: Int, label: String, modifier: Modifier =
             colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color(0xFF6F6F6F))
         )
         Spacer(Modifier.width(6.dp))
-        Text(label, color = Color(0xFF666666), fontSize = 11.sp, maxLines = 1)
+        Text(
+            text = label,
+            color = Color(0xFF666666),
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
@@ -1835,6 +2806,73 @@ private fun LegacyInstallDialog(
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
                     Text(tr("ПРИНЯТЬ", "ACCEPT"), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyUninstallConfirmDialog(
+    appName: String,
+    onDismiss: () -> Unit,
+    onUninstall: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color.White)
+                .border(1.dp, Color(0x33000000))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = appName,
+                color = Color(0xFF1F1F1F),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = stringResource(R.string.uninstall),
+                color = Color(0xFF333333),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Normal
+            )
+            Text(
+                text = stringResource(R.string.uninstall_app_msg),
+                color = Color(0xFF4D4D4D),
+                fontSize = 14.sp,
+                lineHeight = 18.sp
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Text(
+                    text = stringResource(R.string.cancel).uppercase(Locale.getDefault()),
+                    color = Color(0xFF7F7F7F),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clickable { onDismiss() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    Modifier
+                        .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
+                        .clickable { onUninstall() }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = stringResource(R.string.uninstall).uppercase(Locale.getDefault()),
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
@@ -2379,6 +3417,22 @@ private fun isAppInstalledOnDevice(context: android.content.Context, packageName
     val packageManager = context.packageManager
     if (packageManager.getLaunchIntentForPackage(packageName) != null) return true
     return runCatching { packageManager.getPackageInfo(packageName, 0) }.isSuccess
+}
+
+private fun displayNameFromEmail(email: String): String {
+    val local = email.substringBefore('@').trim()
+    if (local.isBlank()) return email
+    return local
+        .replace('.', ' ')
+        .replace('_', ' ')
+        .split(' ')
+        .filter { it.isNotBlank() }
+        .joinToString(" ") { part ->
+            part.lowercase().replaceFirstChar { ch ->
+                if (ch.isLowerCase()) ch.titlecase(Locale.getDefault()) else ch.toString()
+            }
+        }
+        .ifBlank { email }
 }
 
 private fun starsByRating(rating: Float, reviews: Long): String {
