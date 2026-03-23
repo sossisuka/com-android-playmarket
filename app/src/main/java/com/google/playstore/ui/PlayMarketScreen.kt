@@ -1580,7 +1580,7 @@ private fun PlayPromotionsSwiper(heroBanners: List<HomeBanner>, onAppClick: (Sto
             )
             Spacer(Modifier.weight(1f))
             Text(
-                text = "Архивные промо",
+                text = tr("Архивные промо", "Promo archive"),
                 color = Color(0xFF8A8A8A),
                 fontSize = 11.sp
             )
@@ -3445,15 +3445,15 @@ private fun starsByRating(rating: Float, reviews: Long): String {
 
 private fun localizeSectionTitle(title: String): String {
     return when (title.trim()) {
-        "Top Free" -> "Топ бесплатных"
-        "Top Free Apps" -> "Топ бесплатных"
+        "Top Free" -> tr("Топ бесплатных", "Top Free")
+        "Top Free Apps" -> tr("Топ бесплатных", "Top Free Apps")
         "Top Paid" -> "Топ платных"
         "Top Paid Apps" -> "Топ платных"
         "Top Grossing" -> "Самые кассовые"
         "Top New Paid" -> "Новые платные"
         "Top New Free" -> "Новые бесплатные"
-        "Editors' Choice" -> "Выбор редакции"
-        "Editor's Choice" -> "Выбор редакции"
+        "Editors' Choice" -> tr("Выбор редакции", "Editors' Choice")
+        "Editor's Choice" -> tr("Выбор редакции", "Editor's Choice")
         "Games" -> "Игры"
         "Our Favorites" -> "Наш выбор"
         "Recommended" -> "Рекомендуем"
