@@ -120,9 +120,17 @@ import java.io.File
 import java.util.Locale
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private const val INSTALL_STAGE_IDLE = "idle"
+private const val INSTALL_STAGE_PREPARING = "preparing"
+private const val INSTALL_STAGE_DOWNLOADING = "downloading"
+private const val INSTALL_STAGE_INSTALLING = "installing"
+private const val INSTALL_PREPARATION_DURATION_MS = 3_000L
+private const val INSTALL_POLL_INTERVAL_MS = 500L
 
 @Composable
 fun PlayMarketScreen() {
@@ -2437,11 +2445,14 @@ private fun AppDetailsPage(
     var showUninstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var fullscreenShotIndex by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
     var installProgress by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
+    var installStage by rememberSaveable(app.id) { mutableStateOf(INSTALL_STAGE_IDLE) }
     var installDownloadedBytes by rememberSaveable(app.id) { mutableStateOf(0L) }
     var installTotalBytes by rememberSaveable(app.id) { mutableStateOf<Long?>(null) }
     var installErrorMessage by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
     var pendingApkCachePath by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
     var pendingInstallUri by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
+    var installFlowJob by remember(app.id) { mutableStateOf<Job?>(null) }
+    var installMonitorJob by remember(app.id) { mutableStateOf<Job?>(null) }
 
     val clearPendingApk = {
         pendingApkCachePath?.let { cachedPath ->
@@ -2453,20 +2464,61 @@ private fun AppDetailsPage(
         installTotalBytes = null
     }
 
+    val resetInstallUi: (String?) -> Unit = { errorMessage ->
+        installFlowJob?.cancel()
+        installFlowJob = null
+        installMonitorJob?.cancel()
+        installMonitorJob = null
+        installProgress = null
+        installStage = INSTALL_STAGE_IDLE
+        installErrorMessage = errorMessage
+        clearPendingApk()
+    }
+
+    val finishInstallSuccess = {
+        installFlowJob?.cancel()
+        installFlowJob = null
+        installMonitorJob = null
+        installStateRefreshKey += 1
+        installProgress = null
+        installStage = INSTALL_STAGE_IDLE
+        installErrorMessage = null
+        clearPendingApk()
+    }
+
+    val startInstallMonitor = {
+        installMonitorJob?.cancel()
+        installMonitorJob = scope.launch {
+            while (true) {
+                if (isAppInstalledOnDevice(context, app.id)) {
+                    finishInstallSuccess()
+                    return@launch
+                }
+                delay(INSTALL_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
     val installApkLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        installStateRefreshKey += 1
-        installProgress = null
         if (result.resultCode != Activity.RESULT_OK) {
-            installErrorMessage = tr(
-                "Установка не завершена. Проверьте подтверждение в системном установщике.",
-                "Installation not completed. Confirm installation in the system installer."
+            resetInstallUi(
+                tr(
+                    "Установка не завершена. Проверьте подтверждение в системном установщике.",
+                    "Installation not completed. Confirm installation in the system installer."
+                )
             )
-        } else {
-            installErrorMessage = null
+            return@rememberLauncherForActivityResult
         }
-        clearPendingApk()
+
+        if (isAppInstalledOnDevice(context, app.id)) {
+            finishInstallSuccess()
+        } else {
+            installStage = INSTALL_STAGE_INSTALLING
+            installProgress = -1
+            startInstallMonitor()
+        }
     }
 
     val unknownSourcesLauncher = rememberLauncherForActivityResult(
@@ -2475,25 +2527,29 @@ private fun AppDetailsPage(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !context.packageManager.canRequestPackageInstalls()
         ) {
-            installProgress = null
-            installErrorMessage = tr(
-                "Разрешите установку из неизвестных источников для этого приложения.",
-                "Allow unknown app installs for this app."
+            resetInstallUi(
+                tr(
+                    "Разрешите установку из неизвестных источников для этого приложения.",
+                    "Allow unknown app installs for this app."
+                )
             )
-            clearPendingApk()
             return@rememberLauncherForActivityResult
         }
 
         val uriString = pendingInstallUri
         if (uriString.isNullOrBlank()) {
-            installProgress = null
-            installErrorMessage = tr(
-                "Не найден файл APK для установки.",
-                "APK file is missing for installation."
+            resetInstallUi(
+                tr(
+                    "Не найден файл APK для установки.",
+                    "APK file is missing for installation."
+                )
             )
-            clearPendingApk()
             return@rememberLauncherForActivityResult
         }
+
+        installStage = INSTALL_STAGE_INSTALLING
+        installProgress = -1
+        startInstallMonitor()
 
         val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
             data = Uri.parse(uriString)
@@ -2504,12 +2560,131 @@ private fun AppDetailsPage(
         runCatching {
             installApkLauncher.launch(installIntent)
         }.onFailure {
-            installProgress = null
-            installErrorMessage = tr(
-                "Не удалось запустить установщик APK.",
-                "Failed to start APK installer."
+            resetInstallUi(
+                tr(
+                    "Не удалось запустить установщик APK.",
+                    "Failed to start APK installer."
+                )
             )
-            clearPendingApk()
+        }
+    }
+
+    val startInstallFlow = {
+        installFlowJob?.cancel()
+        installFlowJob = null
+        installMonitorJob?.cancel()
+        installMonitorJob = null
+        clearPendingApk()
+        installErrorMessage = null
+        installDownloadedBytes = 0L
+        installTotalBytes = null
+        installStage = INSTALL_STAGE_PREPARING
+        installProgress = -1
+
+        installFlowJob = scope.launch {
+            delay(INSTALL_PREPARATION_DURATION_MS)
+            installStage = INSTALL_STAGE_DOWNLOADING
+            installProgress = 0
+
+            val apkCacheDir = File(context.cacheDir, "apk-installer")
+            val apkCacheFile = File(apkCacheDir, "${app.id}.apk")
+
+            val downloadedFile = runCatching {
+                withContext(Dispatchers.IO) {
+                    if (apkCacheFile.exists()) {
+                        apkCacheFile.delete()
+                    }
+                    apiClient.downloadApkToFile(app.id, apkCacheFile) { downloadedBytes, totalBytes ->
+                        scope.launch {
+                            installStage = INSTALL_STAGE_DOWNLOADING
+                            installDownloadedBytes = downloadedBytes
+                            installTotalBytes = totalBytes.takeIf { it > 0L }
+                            installProgress = if (totalBytes > 0L) {
+                                ((downloadedBytes * 100L) / totalBytes)
+                                    .toInt()
+                                    .coerceIn(0, 100)
+                            } else {
+                                0
+                            }
+                        }
+                    }
+                    apkCacheFile
+                }
+            }.onFailure {
+                resetInstallUi(
+                    tr(
+                        "Не удалось скачать APK из локального API.",
+                        "Failed to download APK from local API."
+                    )
+                )
+                runCatching { apkCacheFile.delete() }
+            }.getOrNull() ?: return@launch
+
+            val apkUri = runCatching {
+                FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    downloadedFile
+                )
+            }.onFailure {
+                resetInstallUi(
+                    tr(
+                        "Не удалось подготовить APK для установки.",
+                        "Failed to prepare APK for installation."
+                    )
+                )
+                runCatching { downloadedFile.delete() }
+            }.getOrNull() ?: return@launch
+
+            pendingApkCachePath = downloadedFile.absolutePath
+            pendingInstallUri = apkUri.toString()
+            val finalSize = downloadedFile.length().coerceAtLeast(0L)
+            installDownloadedBytes = finalSize
+            installTotalBytes = installTotalBytes ?: finalSize
+            installProgress = 100
+            installFlowJob = null
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                !context.packageManager.canRequestPackageInstalls()
+            ) {
+                installStage = INSTALL_STAGE_PREPARING
+                installProgress = -1
+                val settingsIntent = Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:${context.packageName}")
+                )
+                runCatching {
+                    unknownSourcesLauncher.launch(settingsIntent)
+                }.onFailure {
+                    resetInstallUi(
+                        tr(
+                            "Не удалось открыть настройки разрешения на установку.",
+                            "Failed to open install permission settings."
+                        )
+                    )
+                }
+                return@launch
+            }
+
+            installStage = INSTALL_STAGE_INSTALLING
+            installProgress = -1
+            startInstallMonitor()
+            val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+                data = apkUri
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                putExtra(Intent.EXTRA_RETURN_RESULT, true)
+            }
+
+            runCatching {
+                installApkLauncher.launch(installIntent)
+            }.onFailure {
+                resetInstallUi(
+                    tr(
+                        "Не удалось запустить установщик APK.",
+                        "Failed to start APK installer."
+                    )
+                )
+            }
         }
     }
 
@@ -2522,104 +2697,16 @@ private fun AppDetailsPage(
             onDismiss = { showInstallDialog = false },
             onInstall = {
                 showInstallDialog = false
-                installErrorMessage = null
-                installDownloadedBytes = 0L
-                installTotalBytes = null
-                installProgress = 0
-
-                scope.launch {
-                    val apkCacheDir = File(context.cacheDir, "apk-installer")
-                    val apkCacheFile = File(apkCacheDir, "${app.id}.apk")
-
-                    val downloadedFile = runCatching {
-                        withContext(Dispatchers.IO) {
-                            if (apkCacheFile.exists()) {
-                                apkCacheFile.delete()
-                            }
-                            apiClient.downloadApkToFile(app.id, apkCacheFile) { downloadedBytes, totalBytes ->
-                                scope.launch {
-                                    installDownloadedBytes = downloadedBytes
-                                    installTotalBytes = totalBytes.takeIf { it > 0L }
-                                    installProgress = if (totalBytes > 0L) {
-                                        ((downloadedBytes * 100L) / totalBytes)
-                                            .toInt()
-                                            .coerceIn(0, 100)
-                                    } else {
-                                        0
-                                    }
-                                }
-                            }
-                            apkCacheFile
-                        }
-                    }.onFailure {
-                        installProgress = null
-                        installErrorMessage = tr(
-                            "Не удалось скачать APK из локального API.",
-                            "Failed to download APK from local API."
-                        )
-                        runCatching { apkCacheFile.delete() }
-                    }.getOrNull() ?: return@launch
-
-                    val apkUri = runCatching {
-                        FileProvider.getUriForFile(
-                            context,
-                            "${context.packageName}.fileprovider",
-                            downloadedFile
-                        )
-                    }.onFailure {
-                        installProgress = null
-                        installErrorMessage = tr(
-                            "Не удалось подготовить APK для установки.",
-                            "Failed to prepare APK for installation."
-                        )
-                        runCatching { downloadedFile.delete() }
-                    }.getOrNull() ?: return@launch
-
-                    pendingApkCachePath = downloadedFile.absolutePath
-                    pendingInstallUri = apkUri.toString()
-                    val finalSize = downloadedFile.length().coerceAtLeast(0L)
-                    installDownloadedBytes = finalSize
-                    installTotalBytes = installTotalBytes ?: finalSize
-                    installProgress = 100
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                        !context.packageManager.canRequestPackageInstalls()
-                    ) {
-                        val settingsIntent = Intent(
-                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                        runCatching {
-                            unknownSourcesLauncher.launch(settingsIntent)
-                        }.onFailure {
-                            installProgress = null
-                            installErrorMessage = tr(
-                                "Не удалось открыть настройки разрешения на установку.",
-                                "Failed to open install permission settings."
-                            )
-                            clearPendingApk()
-                        }
-                        return@launch
-                    }
-
-                    val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-                        data = apkUri
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        putExtra(Intent.EXTRA_RETURN_RESULT, true)
-                    }
-
-                    runCatching {
-                        installApkLauncher.launch(installIntent)
-                    }.onFailure {
-                        installProgress = null
-                        installErrorMessage = tr(
-                            "Не удалось запустить установщик APK.",
-                            "Failed to start APK installer."
-                        )
-                        clearPendingApk()
-                    }
-                }
+                startInstallFlow()
             }
+        )
+    }
+    if (!installErrorMessage.isNullOrBlank()) {
+        LegacyInstallErrorDialog(
+            appName = app.name,
+            message = installErrorMessage.orEmpty(),
+            onDismiss = { installErrorMessage = null },
+            onRetry = { startInstallFlow() }
         )
     }
     if (showUninstallDialog) {
@@ -2708,21 +2795,12 @@ private fun AppDetailsPage(
                             Spacer(Modifier.height(6.dp))
                             HeaderDownloadProgressPanel(
                                 progress = installProgress ?: 0,
+                                stage = installStage,
                                 downloadedBytes = installDownloadedBytes,
                                 totalBytes = installTotalBytes,
-                                onCancel = { installProgress = null },
+                                onCancel = { resetInstallUi(null) },
                                 modifier = Modifier.fillMaxWidth(),
                                 showCancel = false
-                            )
-                        }
-                        installErrorMessage?.let { message ->
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = message,
-                                color = Color(0xFFB00020),
-                                fontSize = 11.sp,
-                                maxLines = 3,
-                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -2793,8 +2871,7 @@ private fun AppDetailsPage(
                                     .background(Color.White)
                                     .border(1.dp, Color(0x14000000))
                                     .clickable {
-                                        installProgress = null
-                                        clearPendingApk()
+                                        resetInstallUi(null)
                                     }
                                     .padding(horizontal = 8.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -2967,12 +3044,15 @@ private fun AppDetailsPage(
 @Composable
 private fun HeaderDownloadProgressPanel(
     progress: Int,
+    stage: String,
     downloadedBytes: Long,
     totalBytes: Long?,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
     showCancel: Boolean = true
 ) {
+    val isPreparing = stage == INSTALL_STAGE_PREPARING
+    val isInstalling = stage == INSTALL_STAGE_INSTALLING
     val total = totalBytes?.takeIf { it > 0L }
     val actualProgress = if (total != null) {
         ((downloadedBytes.coerceAtMost(total) * 100L) / total).toInt().coerceIn(0, 100)
@@ -2980,12 +3060,15 @@ private fun HeaderDownloadProgressPanel(
         progress.coerceIn(-1, 100)
     }
     val bytesLabel = when {
-        actualProgress < 0 -> tr("Подготовка загрузки", "Preparing download")
+        isInstalling -> tr("Установка...", "Installing...")
+        isPreparing -> tr("Подготовка загрузки...", "Preparing download...")
+        actualProgress < 0 -> tr("Подготовка загрузки...", "Preparing download...")
         total != null -> "${formatBytesLabel(downloadedBytes)} / ${formatBytesLabel(total)}"
         downloadedBytes > 0L -> formatBytesLabel(downloadedBytes)
         else -> "0 B"
     }
     val progressText = when {
+        isInstalling -> ""
         actualProgress < 0 -> tr("Ожидание", "Waiting")
         total != null -> "$actualProgress%"
         else -> tr("Загрузка", "Downloading")
@@ -3023,7 +3106,7 @@ private fun HeaderDownloadProgressPanel(
                 )
             }
         }
-        if (actualProgress < 0 || total == null) {
+        if (isPreparing || isInstalling || actualProgress < 0 || total == null) {
             LegacyKitkatWaitingBar(modifier = Modifier.fillMaxWidth())
         } else {
             LegacyThinProgressBar(progress = actualProgress, modifier = Modifier.fillMaxWidth())
@@ -3083,8 +3166,8 @@ private fun LegacyKitkatWaitingBar(modifier: Modifier = Modifier) {
             .height(5.dp)
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val segment = size.width * 0.28f
-            val gap = size.width * 0.025f
+            val segment = size.width * 0.42f
+            val gap = size.width * 0.02f
             val pattern = segment + gap
             val y = size.height / 2f
             val stroke = size.height
@@ -3273,6 +3356,74 @@ private fun LegacyInstallDialog(
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
                     Text(tr("ПРИНЯТЬ", "ACCEPT"), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyInstallErrorDialog(
+    appName: String,
+    message: String,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color.White)
+                .border(1.dp, Color(0x33000000))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = tr("Ошибка установки", "Install error"),
+                color = Color(0xFF333333),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Normal
+            )
+            Text(
+                text = appName,
+                color = Color(0xFF1F1F1F),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = message,
+                color = Color(0xFF4D4D4D),
+                fontSize = 13.sp,
+                lineHeight = 17.sp
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Text(
+                    tr("ОТМЕНА", "CANCEL"),
+                    color = Color(0xFF7F7F7F),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clickable { onDismiss() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    Modifier
+                        .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
+                        .clickable { onRetry() }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        tr("ПОВТОРИТЬ", "RETRY"),
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
