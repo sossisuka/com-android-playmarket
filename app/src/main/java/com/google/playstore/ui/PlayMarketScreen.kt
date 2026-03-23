@@ -1,7 +1,10 @@
 ﻿package com.google.playstore.ui
 
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.view.ContextThemeWrapper
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -97,6 +100,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
@@ -112,6 +116,7 @@ import com.google.playstore.model.HomeTab
 import com.google.playstore.model.StoreApp
 import com.google.playstore.model.tr
 import com.google.playstore.ui.theme.PlayMarketTheme
+import java.io.File
 import java.util.Locale
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
@@ -2379,6 +2384,8 @@ private fun AppDetailsPage(
     onAppClick: (StoreApp) -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val apiClient = remember { PlayApiClient(BuildConfig.PLAY_API_BASE_URL) }
     val packageManager = context.packageManager
     val uriHandler = LocalUriHandler.current
     val screenshots = remember(app.id, app.screenshots, app.iconUrl) {
@@ -2430,6 +2437,77 @@ private fun AppDetailsPage(
     var showUninstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var fullscreenShotIndex by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
     var installProgress by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
+    var installErrorMessage by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
+    var pendingApkCachePath by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
+    var pendingInstallUri by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
+
+    val clearPendingApk = {
+        pendingApkCachePath?.let { cachedPath ->
+            runCatching { File(cachedPath).delete() }
+        }
+        pendingApkCachePath = null
+        pendingInstallUri = null
+    }
+
+    val installApkLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        installStateRefreshKey += 1
+        installProgress = null
+        if (result.resultCode != Activity.RESULT_OK) {
+            installErrorMessage = tr(
+                "Установка не завершена. Проверьте подтверждение в системном установщике.",
+                "Installation not completed. Confirm installation in the system installer."
+            )
+        } else {
+            installErrorMessage = null
+        }
+        clearPendingApk()
+    }
+
+    val unknownSourcesLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !context.packageManager.canRequestPackageInstalls()
+        ) {
+            installProgress = null
+            installErrorMessage = tr(
+                "Разрешите установку из неизвестных источников для этого приложения.",
+                "Allow unknown app installs for this app."
+            )
+            clearPendingApk()
+            return@rememberLauncherForActivityResult
+        }
+
+        val uriString = pendingInstallUri
+        if (uriString.isNullOrBlank()) {
+            installProgress = null
+            installErrorMessage = tr(
+                "Не найден файл APK для установки.",
+                "APK file is missing for installation."
+            )
+            clearPendingApk()
+            return@rememberLauncherForActivityResult
+        }
+
+        val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+            data = Uri.parse(uriString)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            putExtra(Intent.EXTRA_RETURN_RESULT, true)
+        }
+
+        runCatching {
+            installApkLauncher.launch(installIntent)
+        }.onFailure {
+            installProgress = null
+            installErrorMessage = tr(
+                "Не удалось запустить установщик APK.",
+                "Failed to start APK installer."
+            )
+            clearPendingApk()
+        }
+    }
 
     if (showInstallDialog) {
         LegacyInstallDialog(
@@ -2440,7 +2518,86 @@ private fun AppDetailsPage(
             onDismiss = { showInstallDialog = false },
             onInstall = {
                 showInstallDialog = false
+                installErrorMessage = null
                 installProgress = -1
+
+                scope.launch {
+                    val apkCacheDir = File(context.cacheDir, "apk-installer")
+                    val apkCacheFile = File(apkCacheDir, "${app.id}.apk")
+
+                    val downloadedFile = runCatching {
+                        withContext(Dispatchers.IO) {
+                            if (apkCacheFile.exists()) {
+                                apkCacheFile.delete()
+                            }
+                            apiClient.downloadApkToFile(app.id, apkCacheFile)
+                            apkCacheFile
+                        }
+                    }.onFailure {
+                        installProgress = null
+                        installErrorMessage = tr(
+                            "Не удалось скачать APK из локального API.",
+                            "Failed to download APK from local API."
+                        )
+                        runCatching { apkCacheFile.delete() }
+                    }.getOrNull() ?: return@launch
+
+                    val apkUri = runCatching {
+                        FileProvider.getUriForFile(
+                            context,
+                            "${context.packageName}.fileprovider",
+                            downloadedFile
+                        )
+                    }.onFailure {
+                        installProgress = null
+                        installErrorMessage = tr(
+                            "Не удалось подготовить APK для установки.",
+                            "Failed to prepare APK for installation."
+                        )
+                        runCatching { downloadedFile.delete() }
+                    }.getOrNull() ?: return@launch
+
+                    pendingApkCachePath = downloadedFile.absolutePath
+                    pendingInstallUri = apkUri.toString()
+                    installProgress = 100
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                        !context.packageManager.canRequestPackageInstalls()
+                    ) {
+                        val settingsIntent = Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        runCatching {
+                            unknownSourcesLauncher.launch(settingsIntent)
+                        }.onFailure {
+                            installProgress = null
+                            installErrorMessage = tr(
+                                "Не удалось открыть настройки разрешения на установку.",
+                                "Failed to open install permission settings."
+                            )
+                            clearPendingApk()
+                        }
+                        return@launch
+                    }
+
+                    val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+                        data = apkUri
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        putExtra(Intent.EXTRA_RETURN_RESULT, true)
+                    }
+
+                    runCatching {
+                        installApkLauncher.launch(installIntent)
+                    }.onFailure {
+                        installProgress = null
+                        installErrorMessage = tr(
+                            "Не удалось запустить установщик APK.",
+                            "Failed to start APK installer."
+                        )
+                        clearPendingApk()
+                    }
+                }
             }
         )
     }
@@ -2465,37 +2622,6 @@ private fun AppDetailsPage(
                 }
             }
         )
-    }
-    LaunchedEffect(app.id, installProgress != null) {
-        val startProgress = installProgress ?: return@LaunchedEffect
-        var p: Int = startProgress
-        if (p < 0) {
-            delay(1800)
-            if (installProgress == null) return@LaunchedEffect
-            p = 0
-            installProgress = 0
-        }
-        while (p < 100 && installProgress != null) {
-            val step = when {
-                p < 35 -> 7
-                p < 70 -> 5
-                p < 90 -> 3
-                else -> 1
-            }
-            val pause = when {
-                p < 35 -> 120L
-                p < 70 -> 180L
-                p < 90 -> 240L
-                else -> 320L
-            }
-            delay(pause)
-            p = min(100, p + step)
-            installProgress = p
-        }
-        if (installProgress == 100) {
-            delay(1200)
-            installProgress = null
-        }
     }
     val openShotIndex = fullscreenShotIndex
     if (openShotIndex != null && screenshots.isNotEmpty()) {
@@ -2566,6 +2692,16 @@ private fun AppDetailsPage(
                                 showCancel = false
                             )
                         }
+                        installErrorMessage?.let { message ->
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = message,
+                                color = Color(0xFFB00020),
+                                fontSize = 11.sp,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                     Column(
                         modifier = Modifier
@@ -2633,7 +2769,10 @@ private fun AppDetailsPage(
                                 modifier = Modifier
                                     .background(Color.White)
                                     .border(1.dp, Color(0x14000000))
-                                    .clickable { installProgress = null }
+                                    .clickable {
+                                        installProgress = null
+                                        clearPendingApk()
+                                    }
                                     .padding(horizontal = 8.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {

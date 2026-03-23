@@ -10,6 +10,7 @@ import com.google.playstore.model.AuthUser
 import com.google.playstore.model.FavoriteAppsPayload
 import com.google.playstore.model.FavoriteMutationResult
 import com.google.playstore.model.StoreApp
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -140,6 +141,38 @@ class PlayApiClient(private val baseUrl: String) {
         val json = getJson("/apps/${encodeUrlPart(appId)}")
         if (!json.has("app")) return null
         return mapJsonToStoreApp(json.optJSONObject("app") ?: return null, includeMedia = true)
+    }
+
+    fun downloadApkToFile(packageId: String, destinationFile: File) {
+        val encodedId = encodeUrlPart(packageId)
+        val url = URL(baseUrl.trimEnd('/') + "/apk/$encodedId")
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15_000
+            readTimeout = 60_000
+            setRequestProperty("Accept", "application/vnd.android.package-archive")
+        }
+
+        try {
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                val errorText = connection.errorStream
+                    ?.bufferedReader(Charsets.UTF_8)
+                    ?.use { it.readText() }
+                    .orEmpty()
+                val message = errorText.ifBlank { "HTTP $code" }
+                error("APK download failed ($code): $message")
+            }
+
+            destinationFile.parentFile?.mkdirs()
+            connection.inputStream.use { input ->
+                destinationFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+        } finally {
+            connection.disconnect()
+        }
     }
 
     fun readHome(mode: String): HomePayload {

@@ -23,6 +23,8 @@ skills/
 
 # API / Bun / Node
 api/node_modules/
+api/src/data/apk/
+api/src/data/apk/*.apk
 
 # OS files
 .DS_Store

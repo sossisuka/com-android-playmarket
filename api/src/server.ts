@@ -87,7 +87,9 @@ const USERS_DB_FILE =
   process.env.USERS_DB_FILE ??
   path.resolve(import.meta.dir, "./data/users.db.ts");
 const ICONS_DIR = path.resolve(import.meta.dir, "./data/icons");
+const APK_DIR = path.resolve(import.meta.dir, "./data/apk");
 const APPS_PAGE_SIZE = 20;
+const PACKAGE_ID_RE = /^[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)+$/;
 
 let localIconIndexCache: Map<string, string> | null = null;
 let localIconIndexPromise: Promise<Map<string, string>> | null = null;
@@ -510,10 +512,7 @@ function withResolvedRawIcon(
       req,
       iconIndex,
       id,
-      pickRemoteIconFallback(
-        String(app.icon ?? ""),
-        String(app.image ?? ""),
-      ),
+      pickRemoteIconFallback(String(app.icon ?? ""), String(app.image ?? "")),
     ),
   };
 }
@@ -1397,6 +1396,43 @@ Bun.serve({
         },
       });
       logRequestEnd(req, 200, startedAt, `file=${fileName}`);
+      return response;
+    },
+    "/apk/:packageId": async (req) => {
+      const startedAt = logRequestStart(req);
+      const url = new URL(req.url);
+      const packageId = decodeURIComponent(
+        url.pathname.replace(/^\/apk\//, ""),
+      ).trim();
+
+      if (!PACKAGE_ID_RE.test(packageId)) {
+        const response = badRequest("packageId is invalid");
+        logRequestEnd(req, 400, startedAt, `packageId=${packageId || "-"}`);
+        return response;
+      }
+
+      const filePath = path.join(APK_DIR, `${packageId}.apk`);
+      try {
+        const info = await stat(filePath);
+        if (!info.isFile()) {
+          const response = okJson({ error: "not found" }, { status: 404 });
+          logRequestEnd(req, 404, startedAt, `packageId=${packageId}`);
+          return response;
+        }
+      } catch {
+        const response = okJson({ error: "not found" }, { status: 404 });
+        logRequestEnd(req, 404, startedAt, `packageId=${packageId}`);
+        return response;
+      }
+
+      const response = new Response(Bun.file(filePath), {
+        headers: {
+          "content-type": "application/vnd.android.package-archive",
+          "content-disposition": `attachment; filename="${packageId}.apk"`,
+          "access-control-allow-origin": "*",
+        },
+      });
+      logRequestEnd(req, 200, startedAt, `packageId=${packageId}`);
       return response;
     },
   },
