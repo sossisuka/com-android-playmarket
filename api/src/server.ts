@@ -30,6 +30,8 @@ type SummaryApp = {
   installs: string;
   color: string;
   icon: string;
+  trailerImage: string;
+  trailerUrl: string;
   reviews: number;
 };
 
@@ -424,6 +426,8 @@ function pickSummary(app: RawApp): SummaryApp {
     installs: String(app.installs ?? ""),
     color: String(app.color ?? ""),
     icon: String(app.icon ?? ""),
+    trailerImage: String(app.trailerImage ?? ""),
+    trailerUrl: String(app.trailerUrl ?? ""),
     reviews: Number(app.reviews ?? 0),
   };
 }

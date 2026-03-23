@@ -349,6 +349,8 @@ private fun mapJsonToStoreApp(obj: JSONObject, includeMedia: Boolean): StoreApp 
     val publisher = fixMojibake(obj.optString("publisher", "Unknown"))
     val subtitleRaw = localizeDatesInText(fixMojibake(obj.optString("subtitle", "")))
     val screenshots = if (includeMedia) obj.optJSONArray("screenshots").toStringList() else emptyList()
+    val trailerImageUrl = obj.optString("trailerImage", "")
+    val trailerUrl = obj.optString("trailerUrl", "")
 
     return StoreApp(
         id = id,
@@ -359,8 +361,8 @@ private fun mapJsonToStoreApp(obj: JSONObject, includeMedia: Boolean): StoreApp 
         priceRaw = obj.optString("price", ""),
         installsRaw = obj.optString("installs", ""),
         iconUrl = obj.optString("icon", ""),
-        trailerImageUrl = if (includeMedia) obj.optString("trailerImage", "") else "",
-        trailerUrl = if (includeMedia) obj.optString("trailerUrl", "") else "",
+        trailerImageUrl = trailerImageUrl,
+        trailerUrl = trailerUrl,
         screenshots = screenshots,
         reviews = obj.optLong("reviews", 0L),
         thumbnailColor = parseHslColor(obj.optString("color", "")),

@@ -590,8 +590,10 @@ fun PlayMarketScreen() {
                             app = detailsApp,
                             catalogApps = catalogApps,
                             loadingDetails = loadingDetails,
+                            isAuthenticated = authToken.orEmpty().isNotBlank(),
                             wishlistSelected = detailsApp.id in wishlistAppIds,
                             onWishlistClick = { toggleWishlistForApp(detailsApp) },
+                            onRequireSignIn = { openAuthScreen(LegacyAuthMode.SignIn) },
                             onAppClick = onAppClick
                         )
                     }
@@ -782,6 +784,36 @@ private fun LegacyDrawerAccountPanel(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         if (signedInEmail.isNullOrBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White)
+                    .border(1.dp, Color(0x18000000))
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.ic_google_default_user_avatar),
+                    contentDescription = stringResource(R.string.drawer_user_avatar),
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = tr("Аккаунт Google", "Google account"),
+                        color = Color(0xFF9A9A9A),
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        text = tr("Гость", "Guest"),
+                        color = Color(0xFF404040),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
             Text(
                 text = stringResource(R.string.account_required_external),
                 color = Color(0xFF6C6C6C),
@@ -799,7 +831,7 @@ private fun LegacyDrawerAccountPanel(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Image(
-                    painter = painterResource(R.drawable.ic_menu_user_avatar),
+                    painter = painterResource(R.drawable.ic_google_default_user_avatar),
                     contentDescription = stringResource(R.string.drawer_user_avatar),
                     modifier = Modifier.size(24.dp)
                 )
@@ -2387,8 +2419,10 @@ private fun AppDetailsPage(
     app: StoreApp,
     catalogApps: List<StoreApp>,
     loadingDetails: Boolean,
+    isAuthenticated: Boolean,
     wishlistSelected: Boolean,
     onWishlistClick: () -> Unit,
+    onRequireSignIn: () -> Unit,
     onAppClick: (StoreApp) -> Unit
 ) {
     val context = LocalContext.current
@@ -2396,21 +2430,31 @@ private fun AppDetailsPage(
     val apiClient = remember { PlayApiClient(BuildConfig.PLAY_API_BASE_URL) }
     val packageManager = context.packageManager
     val uriHandler = LocalUriHandler.current
-    val screenshots = remember(app.id, app.screenshots, app.iconUrl) {
+    val screenshotImages = remember(app.id, app.screenshots, app.iconUrl) {
         app.screenshots
             .map(String::trim)
             .filter(String::isNotBlank)
             .ifEmpty { if (app.iconUrl.isBlank()) emptyList() else listOf(app.iconUrl) }
     }
-    val hasTrailer = app.trailerImageUrl.isNotBlank()
-    val infiniteScreenshots = screenshots.size > 1
+    val trailerImage = app.trailerImageUrl.trim()
+    val hasTrailer = trailerImage.isNotBlank()
+    val mediaItems = remember(app.id, trailerImage, screenshotImages) {
+        buildList {
+            if (trailerImage.isNotBlank()) add(trailerImage to true)
+            screenshotImages
+                .filterNot { it == trailerImage }
+                .forEach { add(it to false) }
+        }
+    }
+    val mediaImages = remember(mediaItems) { mediaItems.map { it.first } }
+    val infiniteScreenshots = mediaItems.size > 1
     val infiniteScreenshotsVirtualCount = 1_000_000
     val screenshotsVirtualCount = if (infiniteScreenshots) {
         infiniteScreenshotsVirtualCount
     } else {
-        screenshots.size
+        mediaItems.size
     }
-    val screenshotsStartIndex = remember(screenshots.size, hasTrailer, screenshotsVirtualCount) {
+    val screenshotsStartIndex = remember(mediaItems.size, hasTrailer, screenshotsVirtualCount) {
         if (!infiniteScreenshots) {
             0
         } else if (hasTrailer) {
@@ -2418,7 +2462,7 @@ private fun AppDetailsPage(
             0
         } else {
             val middle = screenshotsVirtualCount / 2
-            val alignedMiddle = middle - (middle % screenshots.size)
+            val alignedMiddle = middle - (middle % mediaItems.size)
             alignedMiddle
         }
     }
@@ -2442,6 +2486,7 @@ private fun AppDetailsPage(
         installStateRefreshKey += 1
     }
     var showInstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
+    var showInstallAuthDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var showUninstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var fullscreenShotIndex by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
     var installProgress by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
@@ -2569,7 +2614,12 @@ private fun AppDetailsPage(
         }
     }
 
-    val startInstallFlow = {
+    val startInstallFlow = startInstallFlow@{
+        if (!isAuthenticated) {
+            installErrorMessage = null
+            showInstallAuthDialog = true
+            return@startInstallFlow
+        }
         installFlowJob?.cancel()
         installFlowJob = null
         installMonitorJob?.cancel()
@@ -2688,6 +2738,16 @@ private fun AppDetailsPage(
         }
     }
 
+    if (showInstallAuthDialog) {
+        LegacyInstallAuthRequiredDialog(
+            appName = app.name,
+            onDismiss = { showInstallAuthDialog = false },
+            onSignIn = {
+                showInstallAuthDialog = false
+                onRequireSignIn()
+            }
+        )
+    }
     if (showInstallDialog) {
         LegacyInstallDialog(
             appName = app.name,
@@ -2732,10 +2792,10 @@ private fun AppDetailsPage(
         )
     }
     val openShotIndex = fullscreenShotIndex
-    if (openShotIndex != null && screenshots.isNotEmpty()) {
+    if (openShotIndex != null && mediaImages.isNotEmpty()) {
         FullscreenScreenshotViewer(
-            images = screenshots,
-            initialIndex = openShotIndex.coerceIn(0, screenshots.lastIndex),
+            images = mediaImages,
+            initialIndex = openShotIndex.coerceIn(0, mediaImages.lastIndex),
             onDismiss = { fullscreenShotIndex = null }
         )
     }
@@ -2826,7 +2886,12 @@ private fun AppDetailsPage(
                                             if (isInstalledOnDevice && launchIntent != null) {
                                                 context.startActivity(launchIntent)
                                             } else if (!isInstalledOnDevice) {
-                                                showInstallDialog = true
+                                                if (isAuthenticated) {
+                                                    showInstallDialog = true
+                                                } else {
+                                                    installErrorMessage = null
+                                                    showInstallAuthDialog = true
+                                                }
                                             }
                                         }
                                         .padding(horizontal = 10.dp, vertical = 7.dp),
@@ -2932,29 +2997,25 @@ private fun AppDetailsPage(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         contentPadding = PaddingValues(horizontal = 10.dp)
                     ) {
-                        if (hasTrailer) {
-                            item {
-                                AdaptiveMediaCard(
-                                    imageUrl = app.trailerImageUrl,
-                                    height = 180.dp,
-                                    defaultRatio = 1.34f,
-                                    minRatio = 1.1f,
-                                    maxRatio = 1.85f,
-                                    onClick = { if (app.trailerUrl.isNotBlank()) uriHandler.openUri(app.trailerUrl) },
-                                    showPlay = true
-                                )
-                            }
-                        }
                         items(count = screenshotsVirtualCount) { index ->
-                            val screenshotIndex = if (screenshots.isEmpty()) 0 else index % screenshots.size
-                            val shot = screenshots.getOrNull(screenshotIndex) ?: return@items
+                            val mediaIndex = if (mediaItems.isEmpty()) 0 else index % mediaItems.size
+                            val media = mediaItems.getOrNull(mediaIndex) ?: return@items
+                            val imageUrl = media.first
+                            val isTrailerImage = media.second
                             AdaptiveMediaCard(
-                                imageUrl = shot,
+                                imageUrl = imageUrl,
                                 height = 180.dp,
-                                defaultRatio = 0.58f,
+                                defaultRatio = if (isTrailerImage) 1.34f else 0.58f,
                                 minRatio = 0.52f,
                                 maxRatio = 1.85f,
-                                onClick = { fullscreenShotIndex = screenshotIndex }
+                                onClick = {
+                                    if (isTrailerImage && app.trailerUrl.isNotBlank()) {
+                                        uriHandler.openUri(app.trailerUrl)
+                                    } else {
+                                        fullscreenShotIndex = mediaIndex
+                                    }
+                                },
+                                showPlay = isTrailerImage && app.trailerUrl.isNotBlank()
                             )
                         }
                     }
@@ -3356,6 +3417,76 @@ private fun LegacyInstallDialog(
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
                     Text(tr("ПРИНЯТЬ", "ACCEPT"), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyInstallAuthRequiredDialog(
+    appName: String,
+    onDismiss: () -> Unit,
+    onSignIn: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color.White)
+                .border(1.dp, Color(0x33000000))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = tr("Требуется вход", "Sign in required"),
+                color = Color(0xFF333333),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Normal
+            )
+            Text(
+                text = appName,
+                color = Color(0xFF1F1F1F),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = tr(
+                    "Чтобы установить приложение, войдите в аккаунт Google Play.",
+                    "To install this app, sign in to your Google Play account."
+                ),
+                color = Color(0xFF4D4D4D),
+                fontSize = 13.sp,
+                lineHeight = 17.sp
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Text(
+                    tr("ОТМЕНА", "CANCEL"),
+                    color = Color(0xFF7F7F7F),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clickable { onDismiss() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    Modifier
+                        .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
+                        .clickable { onSignIn() }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        tr("ВОЙТИ", "SIGN IN"),
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
