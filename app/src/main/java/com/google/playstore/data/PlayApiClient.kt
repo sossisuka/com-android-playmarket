@@ -7,6 +7,8 @@ import com.google.playstore.model.HomePayload
 import com.google.playstore.model.ApiPage
 import com.google.playstore.model.AuthSession
 import com.google.playstore.model.AuthUser
+import com.google.playstore.model.FavoriteAppsPayload
+import com.google.playstore.model.FavoriteMutationResult
 import com.google.playstore.model.StoreApp
 import java.net.HttpURLConnection
 import java.net.URL
@@ -53,6 +55,29 @@ class PlayApiClient(private val baseUrl: String) {
 
     fun logout(token: String) {
         requestJson("POST", "/auth/logout", authToken = token)
+    }
+
+    fun readFavorites(token: String): FavoriteAppsPayload {
+        val json = requestJson("GET", "/favorites", authToken = token)
+        val itemsJson = json.optJSONArray("items") ?: JSONArray()
+        val items = ArrayList<StoreApp>(itemsJson.length())
+        for (i in 0 until itemsJson.length()) {
+            val obj = itemsJson.optJSONObject(i) ?: continue
+            items.add(mapJsonToStoreApp(obj, includeMedia = false))
+        }
+        return FavoriteAppsPayload(
+            items = items,
+            favoriteAppIds = json.optJSONArray("favoriteAppIds").toStringList()
+        )
+    }
+
+    fun setFavorite(token: String, appId: String, favorite: Boolean): FavoriteMutationResult {
+        val method = if (favorite) "POST" else "DELETE"
+        val json = requestJson(method, "/favorites/${encodeUrlPart(appId)}", authToken = token)
+        return FavoriteMutationResult(
+            favoriteAppIds = json.optJSONArray("favoriteAppIds").toStringList(),
+            isFavorite = json.optBoolean("isFavorite", false)
+        )
     }
 
     fun readInitialSummaries(limit: Int = 300): List<StoreApp> {

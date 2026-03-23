@@ -1331,4 +1331,6 @@ CVC-код – это четырехзначное число, располож
     >Создайте аккаунт Google, чтобы пользоваться Google Play Маркетом на этом устройстве.</string>
 <string name="auth_signed_in_as">Вы вошли как</string>
 <string name="auth_sign_out">Выйти</string>
+<string name="drawer_settings_icon">Настройки</string>
+<string name="drawer_user_avatar">Профиль пользователя</string>
 </resources>

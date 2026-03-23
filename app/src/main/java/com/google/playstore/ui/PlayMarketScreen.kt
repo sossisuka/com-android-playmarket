@@ -133,6 +133,7 @@ fun PlayMarketScreen() {
     var selectedApp by remember { mutableStateOf<StoreApp?>(null) }
     var selectedCategory by rememberSaveable { mutableStateOf<String?>(null) }
     var showInstalledPackages by rememberSaveable { mutableStateOf(false) }
+    var showWishlist by rememberSaveable { mutableStateOf(false) }
     var searchMode by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var authMode by rememberSaveable { mutableStateOf<LegacyAuthMode?>(null) }
@@ -141,6 +142,10 @@ fun PlayMarketScreen() {
     var signedInEmail by rememberSaveable { mutableStateOf<String?>(null) }
     var authInProgress by remember { mutableStateOf(false) }
     var wishlistAppIds by rememberSaveable { mutableStateOf(setOf<String>()) }
+    var wishlistApps by remember { mutableStateOf<List<StoreApp>>(emptyList()) }
+    var wishlistLoading by remember { mutableStateOf(false) }
+    var wishlistError by remember { mutableStateOf<String?>(null) }
+    var wishlistMutationInFlightIds by remember { mutableStateOf(setOf<String>()) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val apiClient = remember { PlayApiClient(BuildConfig.PLAY_API_BASE_URL) }
@@ -149,6 +154,27 @@ fun PlayMarketScreen() {
         AuthSessionStore(context.applicationContext)
     }
     val headerSearchMode = searchMode && selectedApp == null && authMode == null
+    val loadWishlistFromApi: suspend (String) -> Unit = { token ->
+        if (token.isBlank()) {
+            wishlistApps = emptyList()
+            wishlistAppIds = emptySet()
+            wishlistError = null
+            wishlistLoading = false
+        } else {
+            wishlistLoading = true
+            runCatching {
+                withContext(Dispatchers.IO) { apiClient.readFavorites(token) }
+            }.onSuccess { payload ->
+                wishlistApps = payload.items
+                wishlistAppIds = payload.favoriteAppIds.toSet()
+                wishlistError = null
+            }.onFailure {
+                wishlistError = it.message
+            }.also {
+                wishlistLoading = false
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         runCatching {
@@ -210,12 +236,17 @@ fun PlayMarketScreen() {
             signedInName = user.name
             signedInEmail = user.email
             wishlistAppIds = user.favoriteAppIds.toSet()
+            wishlistError = null
         }.onFailure {
             authSessionStore.clear()
             authToken = null
             signedInName = null
             signedInEmail = null
             wishlistAppIds = emptySet()
+            wishlistApps = emptyList()
+            wishlistError = null
+            wishlistMutationInFlightIds = emptySet()
+            showWishlist = false
         }
     }
 
@@ -243,9 +274,63 @@ fun PlayMarketScreen() {
         selectedApp = null
         selectedCategory = null
         showInstalledPackages = false
+        showWishlist = false
         searchMode = false
         searchQuery = ""
         scope.launch { drawerState.close() }
+    }
+    val toggleWishlistForApp: (StoreApp) -> Unit = toggleWishlistForApp@{ app ->
+        val token = authToken.orEmpty()
+        if (token.isBlank()) {
+            openAuthScreen(LegacyAuthMode.SignIn)
+            return@toggleWishlistForApp
+        }
+        val appId = app.id
+        if (appId in wishlistMutationInFlightIds) {
+            return@toggleWishlistForApp
+        }
+
+        val previousIds = wishlistAppIds
+        val previousApps = wishlistApps
+        val wasFavorite = appId in previousIds
+
+        wishlistMutationInFlightIds = wishlistMutationInFlightIds + appId
+        wishlistAppIds = if (wasFavorite) {
+            previousIds - appId
+        } else {
+            previousIds + appId
+        }
+        wishlistApps = if (wasFavorite) {
+            previousApps.filterNot { it.id == appId }
+        } else {
+            listOf(app) + previousApps.filterNot { it.id == appId }
+        }
+
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    apiClient.setFavorite(token, appId, favorite = !wasFavorite)
+                }
+            }.onSuccess { result ->
+                wishlistAppIds = result.favoriteAppIds.toSet()
+                wishlistError = null
+                if (showWishlist) {
+                    loadWishlistFromApi(token)
+                }
+            }.onFailure {
+                wishlistAppIds = previousIds
+                wishlistApps = previousApps
+                wishlistError = it.message
+            }.also {
+                wishlistMutationInFlightIds = wishlistMutationInFlightIds - appId
+            }
+        }
+    }
+    LaunchedEffect(showWishlist, authToken) {
+        if (!showWishlist) return@LaunchedEffect
+        val token = authToken.orEmpty()
+        if (token.isBlank()) return@LaunchedEffect
+        loadWishlistFromApi(token)
     }
 
     ModalNavigationDrawer(
@@ -258,24 +343,40 @@ fun PlayMarketScreen() {
                     when (section) {
                         DrawerSection.MyApps -> {
                             showInstalledPackages = true
+                            showWishlist = false
                             catalogMode = CatalogMode.Apps
                             tab = HomeTab.Home
                             selectedCategory = null
                         }
                         DrawerSection.Games -> {
                             showInstalledPackages = false
+                            showWishlist = false
                             catalogMode = CatalogMode.Games
                             tab = HomeTab.Home
                             selectedCategory = null
                         }
                         DrawerSection.Categories -> {
                             showInstalledPackages = false
+                            showWishlist = false
                             catalogMode = CatalogMode.Apps
                             tab = HomeTab.Categories
                             selectedCategory = null
                         }
+                        DrawerSection.Editors -> {
+                            val token = authToken.orEmpty()
+                            if (token.isBlank()) {
+                                openAuthScreen(LegacyAuthMode.SignIn)
+                                return@LegacyLeftDrawer
+                            }
+                            showInstalledPackages = false
+                            showWishlist = true
+                            catalogMode = CatalogMode.Apps
+                            tab = HomeTab.Home
+                            selectedCategory = null
+                        }
                         else -> {
                             showInstalledPackages = false
+                            showWishlist = false
                             catalogMode = CatalogMode.Apps
                             tab = HomeTab.Home
                             selectedCategory = null
@@ -298,6 +399,10 @@ fun PlayMarketScreen() {
                         signedInName = null
                         signedInEmail = null
                         wishlistAppIds = emptySet()
+                        wishlistApps = emptyList()
+                        wishlistError = null
+                        wishlistMutationInFlightIds = emptySet()
+                        showWishlist = false
                         scope.launch { drawerState.close() }
                     } else {
                         scope.launch {
@@ -309,6 +414,10 @@ fun PlayMarketScreen() {
                             signedInName = null
                             signedInEmail = null
                             wishlistAppIds = emptySet()
+                            wishlistApps = emptyList()
+                            wishlistError = null
+                            wishlistMutationInFlightIds = emptySet()
+                            showWishlist = false
                             drawerState.close()
                         }
                     }
@@ -332,24 +441,22 @@ fun PlayMarketScreen() {
                             null -> null
                         }
                         ?: if (showInstalledPackages) stringResource(R.string.my_downloads_menu) else null
+                        ?: if (showWishlist) stringResource(R.string.menu_my_wishlist) else null
                         ?: selectedCategory?.let { categoryLabelRu(it) }
                         ?: if (catalogMode == CatalogMode.Games) stringResource(R.string.games_corpus_title) else stringResource(R.string.apps_title),
-                    showBack = selectedApp != null || selectedCategory != null || showInstalledPackages || searchMode || authMode != null,
-                    appPageMode = selectedApp != null || selectedCategory != null || showInstalledPackages || authMode != null,
+                    showBack = selectedApp != null || selectedCategory != null || showInstalledPackages || showWishlist || searchMode || authMode != null,
+                    appPageMode = selectedApp != null || selectedCategory != null || showInstalledPackages || showWishlist || authMode != null,
                     showAppHeaderActions = selectedApp != null,
                     searchMode = headerSearchMode,
                     searchQuery = searchQuery,
                     onSearchQueryChange = { searchQuery = it },
-                    onSearchClick = { if (selectedApp == null && authMode == null && !showInstalledPackages) searchMode = true },
-                    wishlistSelected = selectedApp?.id?.let { it in wishlistAppIds } == true,
-                    onWishlistClick = {
-                        val appId = selectedApp?.id ?: return@LegacyTopBar
-                        wishlistAppIds = if (appId in wishlistAppIds) {
-                            wishlistAppIds - appId
-                        } else {
-                            wishlistAppIds + appId
+                    onSearchClick = {
+                        if (selectedApp == null && authMode == null && !showInstalledPackages && !showWishlist) {
+                            searchMode = true
                         }
                     },
+                    wishlistSelected = selectedApp?.id?.let { it in wishlistAppIds } == true,
+                    onWishlistClick = { selectedApp?.let(toggleWishlistForApp) },
                     onShareClick = {
                         val app = selectedApp ?: return@LegacyTopBar
                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
@@ -367,6 +474,7 @@ fun PlayMarketScreen() {
                             selectedApp != null -> selectedApp = null
                             authMode != null -> authMode = null
                             showInstalledPackages -> showInstalledPackages = false
+                            showWishlist -> showWishlist = false
                             selectedCategory != null -> selectedCategory = null
                             searchMode -> {
                                 searchMode = false
@@ -407,6 +515,7 @@ fun PlayMarketScreen() {
                             signedInName = session.user.name
                             signedInEmail = session.user.email
                             wishlistAppIds = session.user.favoriteAppIds.toSet()
+                            wishlistError = null
                             authMode = null
                         } finally {
                             authInProgress = false
@@ -423,6 +532,19 @@ fun PlayMarketScreen() {
                             apiClient = apiClient,
                             storeApps = apps,
                             loadingCatalog = fullCatalogLoading,
+                            onAppClick = onAppClick
+                        )
+                    } else if (showWishlist) {
+                        WishlistPage(
+                            apps = wishlistApps,
+                            loading = wishlistLoading,
+                            error = wishlistError,
+                            onRetry = {
+                                val token = authToken.orEmpty()
+                                if (token.isNotBlank()) {
+                                    scope.launch { loadWishlistFromApi(token) }
+                                }
+                            },
                             onAppClick = onAppClick
                         )
                     } else if (searchMode) {
@@ -450,10 +572,13 @@ fun PlayMarketScreen() {
                     }
 
                     if (selectedApp != null) {
+                        val detailsApp = selectedApp!!
                         AppDetailsPage(
-                            app = selectedApp!!,
+                            app = detailsApp,
                             catalogApps = catalogApps,
                             loadingDetails = loadingDetails,
+                            wishlistSelected = detailsApp.id in wishlistAppIds,
+                            onWishlistClick = { toggleWishlistForApp(detailsApp) },
                             onAppClick = onAppClick
                         )
                     }
@@ -564,7 +689,7 @@ private fun LegacyLeftDrawer(
         add(Triple(DrawerSection.MyApps, R.string.my_downloads_menu, R.drawable.ic_menu_market_myapps))
         add(Triple(DrawerSection.Games, R.string.games_corpus_title, R.drawable.ic_menu_games_dark))
         add(Triple(DrawerSection.Categories, R.string.category_tab_title, R.drawable.ic_menu_shop_holo_dark))
-        add(Triple(DrawerSection.Settings, R.string.settings, R.drawable.ic_menu_market_settings))
+        add(Triple(DrawerSection.Settings, R.string.settings, R.drawable.ic_menu_settings_gear))
         if (!signedInEmail.isNullOrBlank()) {
             add(Triple(DrawerSection.Editors, R.string.menu_my_wishlist, R.drawable.ic_menu_market_wishlist))
         }
@@ -597,6 +722,10 @@ private fun LegacyLeftDrawer(
         )
         HorizontalDivider(color = Color(0x12000000))
         menuItems.forEach { (section, title, iconRes) ->
+            val iconDescription = when (section) {
+                DrawerSection.Settings -> stringResource(R.string.drawer_settings_icon)
+                else -> null
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -608,7 +737,7 @@ private fun LegacyLeftDrawer(
             ) {
                 Image(
                     painter = painterResource(iconRes),
-                    contentDescription = null,
+                    contentDescription = iconDescription,
                     modifier = Modifier.size(20.dp),
                     colorFilter = if (section == DrawerSection.MyApps || section == DrawerSection.Categories) {
                         androidx.compose.ui.graphics.ColorFilter.tint(Color(0xFF4A4A4A))
@@ -639,12 +768,14 @@ private fun LegacyDrawerAccountPanel(
             .padding(horizontal = 14.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text(
-            text = stringResource(R.string.account_required_external),
-            color = Color(0xFF6C6C6C),
-            fontSize = 12.sp,
-            lineHeight = 17.sp
-        )
+        if (signedInEmail.isNullOrBlank()) {
+            Text(
+                text = stringResource(R.string.account_required_external),
+                color = Color(0xFF6C6C6C),
+                fontSize = 12.sp,
+                lineHeight = 17.sp
+            )
+        }
         if (!signedInEmail.isNullOrBlank()) {
             Row(
                 modifier = Modifier
@@ -655,9 +786,9 @@ private fun LegacyDrawerAccountPanel(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Image(
-                    painter = painterResource(R.mipmap.ic_menu_play_store),
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp)
+                    painter = painterResource(R.drawable.ic_menu_user_avatar),
+                    contentDescription = stringResource(R.string.drawer_user_avatar),
+                    modifier = Modifier.size(24.dp)
                 )
                 Spacer(Modifier.width(10.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -1148,15 +1279,15 @@ private fun LegacyTopBar(
         ) {
             if (appPageMode || showBack) {
                 Image(
-                    painter = painterResource(R.drawable.ic_ab_back),
+                    painter = painterResource(R.drawable.ic_arrow_back_modern),
                     contentDescription = null,
                     modifier = Modifier.size(20.dp)
                 )
             } else {
-                Text(
-                    text = "\u2630",
-                    color = Color.White,
-                    fontSize = 18.sp,
+                Image(
+                    painter = painterResource(R.drawable.ic_menu_hamburger),
+                    contentDescription = stringResource(R.string.drawer_home),
+                    modifier = Modifier.size(18.dp)
                 )
             }
             Spacer(Modifier.width(6.dp))
@@ -1509,6 +1640,124 @@ private fun InstalledPackageListItem(
         )
     }
     HorizontalDivider(color = Color(0x12000000), modifier = Modifier.padding(start = 68.dp))
+}
+
+@Composable
+private fun WishlistPage(
+    apps: List<StoreApp>,
+    loading: Boolean,
+    error: String?,
+    onRetry: () -> Unit,
+    onAppClick: (StoreApp) -> Unit
+) {
+    if (loading && apps.isEmpty()) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            LegacyPlayLoadingSpinner(size = 22.dp)
+        }
+        return
+    }
+
+    if (error != null && apps.isEmpty()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = tr("Не удалось загрузить список желаний", "Failed to load wishlist"),
+                color = Color(0xFF4F4F4F),
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = error,
+                color = Color(0xFF8A8A8A),
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = tr("Повторить", "Retry"),
+                color = Color(0xFF3B78B6),
+                fontSize = 14.sp,
+                modifier = Modifier.clickable { onRetry() }
+            )
+        }
+        return
+    }
+
+    if (apps.isEmpty()) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = tr(
+                    "В списке желаний пока нет приложений.",
+                    "There are no items in your wishlist."
+                ),
+                color = Color(0xFF6A6A6A),
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 20.dp)
+            )
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        items(apps, key = { it.id }) { app ->
+            CompactListItem(app = app) { onAppClick(app) }
+        }
+        if (loading) {
+            item(key = "wishlist_loading") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.White)
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    LegacyPlayLoadingSpinner(size = 18.dp)
+                }
+            }
+        }
+        if (error != null) {
+            item(key = "wishlist_error_hint") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.White)
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = tr("Ошибка синхронизации", "Sync error"),
+                        color = Color(0xFF8A8A8A),
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = tr("Повторить", "Retry"),
+                        color = Color(0xFF3B78B6),
+                        fontSize = 12.sp,
+                        modifier = Modifier.clickable { onRetry() }
+                    )
+                }
+            }
+        }
+    }
 }
 
 private enum class ChartCardStyle { Classic, GrossingBlend }
@@ -2121,7 +2370,14 @@ private fun SearchResultsPage(
 }
 
 @Composable
-private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDetails: Boolean, onAppClick: (StoreApp) -> Unit) {
+private fun AppDetailsPage(
+    app: StoreApp,
+    catalogApps: List<StoreApp>,
+    loadingDetails: Boolean,
+    wishlistSelected: Boolean,
+    onWishlistClick: () -> Unit,
+    onAppClick: (StoreApp) -> Unit
+) {
     val context = LocalContext.current
     val packageManager = context.packageManager
     val uriHandler = LocalUriHandler.current
@@ -2397,7 +2653,12 @@ private fun AppDetailsPage(app: StoreApp, catalogApps: List<StoreApp>, loadingDe
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                DetailsSmallAction(R.drawable.ic_menu_market_wishlist, tr("В список желаний", "Add to wishlist"), Modifier.weight(1f))
+                DetailsSmallAction(
+                    iconRes = R.drawable.ic_menu_market_wishlist,
+                    label = if (wishlistSelected) stringResource(R.string.wishlist_remove) else stringResource(R.string.wishlist_add),
+                    modifier = Modifier.weight(1f),
+                    onClick = onWishlistClick
+                )
                 DetailsSmallAction(R.drawable.ic_menu_share_holo_dark, tr("Поделиться", "Share"), Modifier.weight(1f))
             }
             HorizontalDivider(color = Color(0x12000000))
@@ -2699,7 +2960,7 @@ private fun FullscreenScreenshotViewer(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Image(
-                    painter = painterResource(R.drawable.ic_ab_back),
+                    painter = painterResource(R.drawable.ic_arrow_back_modern),
                     contentDescription = "Назад",
                     modifier = Modifier
                         .size(28.dp)
@@ -2717,9 +2978,19 @@ private fun FullscreenScreenshotViewer(
 }
 
 @Composable
-private fun DetailsSmallAction(iconRes: Int, label: String, modifier: Modifier = Modifier) {
+private fun DetailsSmallAction(
+    iconRes: Int,
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null
+) {
+    val actionModifier = if (onClick != null) {
+        modifier.clickable { onClick() }
+    } else {
+        modifier
+    }
     Row(
-        modifier = modifier
+        modifier = actionModifier
             .fillMaxWidth()
             .background(Color(0xFFF8F8F8))
             .border(1.dp, Color(0x12000000))

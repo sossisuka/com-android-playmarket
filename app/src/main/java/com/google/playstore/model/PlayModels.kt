@@ -106,6 +106,16 @@ data class AuthSession(
     val user: AuthUser
 )
 
+data class FavoriteAppsPayload(
+    val items: List<StoreApp>,
+    val favoriteAppIds: List<String>
+)
+
+data class FavoriteMutationResult(
+    val favoriteAppIds: List<String>,
+    val isFavorite: Boolean
+)
+
 fun tr(ru: String, en: String): String {
     return if (Locale.getDefault().language.lowercase().startsWith("ru")) ru else en
 }

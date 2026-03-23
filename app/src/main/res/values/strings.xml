@@ -1361,4 +1361,6 @@ Learn more in Google Settings > Verify apps."</string>
     >Create a Google Account to use Google Play Store on this device.</string>
     <string name="auth_signed_in_as">Signed in as</string>
     <string name="auth_sign_out">Sign out</string>
+    <string name="drawer_settings_icon">Settings</string>
+    <string name="drawer_user_avatar">User profile</string>
 </resources>
