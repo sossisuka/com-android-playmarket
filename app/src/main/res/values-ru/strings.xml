@@ -1253,7 +1253,7 @@ CVC-код – это четырехзначное число, располож
     <string name="archive_label">Удалить</string>
     <string name="app_details_page">О приложении</string>
     <string name="wishlist_add">Добавить в список желаний</string>
-    <string name="wishlist_remove">Удалить</string>
+<string name="wishlist_remove">Убрать из списка желаний</string>
     <string name="not_interested">Закрыть</string>
     <string name="more_label">Ещё</string>
     <string name="track_play">ВОСПР.</string>

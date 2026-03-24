@@ -1,0 +1,108 @@
+{
+  "reviews": [
+    {
+      "id": "seed-angrybirds-001",
+      "packageId": "com.rovio.angrybirds",
+      "userId": "seed-user-001",
+      "authorName": "Max B.",
+      "title": "Still the best slingshot game",
+      "text": "Classic physics, short levels, and no learning curve. Works great on old phones.",
+      "rating": 5,
+      "createdAt": "2014-02-20T10:15:00.000Z",
+      "updatedAt": "2014-02-20T10:15:00.000Z",
+      "appVersion": "4.1.0",
+      "deviceLabel": "Galaxy S4"
+    },
+    {
+      "id": "seed-angrybirds-002",
+      "packageId": "com.rovio.angrybirds",
+      "userId": "seed-user-002",
+      "authorName": "Kate L.",
+      "title": "Perfect for quick sessions",
+      "text": "Easy to jump in for a few minutes and finish a level or two. The controls still feel precise.",
+      "rating": 5,
+      "createdAt": "2014-02-18T17:42:00.000Z",
+      "updatedAt": "2014-02-18T17:42:00.000Z",
+      "appVersion": "4.1.0",
+      "deviceLabel": "Nexus 5"
+    },
+    {
+      "id": "seed-angrybirds-003",
+      "packageId": "com.rovio.angrybirds",
+      "userId": "seed-user-003",
+      "authorName": "Ivan P.",
+      "title": "Great remake of the original formula",
+      "text": "The bird powers are fun again and the game runs smoothly even on API 21 devices.",
+      "rating": 4,
+      "createdAt": "2014-02-16T09:05:00.000Z",
+      "updatedAt": "2014-02-16T09:05:00.000Z",
+      "appVersion": "4.1.0",
+      "deviceLabel": "Xperia Z"
+    },
+    {
+      "id": "seed-angrybirds-004",
+      "packageId": "com.rovio.angrybirds",
+      "userId": "seed-user-004",
+      "authorName": "John R.",
+      "title": "Good, but I miss more challenge",
+      "text": "Nice art and sounds, but the early levels are too easy. Later stages are much better.",
+      "rating": 4,
+      "createdAt": "2014-02-14T12:30:00.000Z",
+      "updatedAt": "2014-02-14T12:30:00.000Z",
+      "appVersion": "4.1.0",
+      "deviceLabel": "HTC One"
+    },
+    {
+      "id": "seed-angrybirds-005",
+      "packageId": "com.rovio.angrybirds",
+      "userId": "seed-user-005",
+      "authorName": "Lena S.",
+      "title": "My kids keep asking for one more level",
+      "text": "Simple to understand, colorful, and easy to hand to a child without explaining much.",
+      "rating": 5,
+      "createdAt": "2014-02-12T08:11:00.000Z",
+      "updatedAt": "2014-02-12T08:11:00.000Z",
+      "appVersion": "4.1.0",
+      "deviceLabel": "Galaxy Note 3"
+    },
+    {
+      "id": "seed-angrybirds-006",
+      "packageId": "com.rovio.angrybirds",
+      "userId": "seed-user-006",
+      "authorName": "Chris T.",
+      "title": "Good performance on x86 emulator",
+      "text": "Installed it to test game compatibility and it launched without any weird glitches or crashes.",
+      "rating": 4,
+      "createdAt": "2014-02-10T19:27:00.000Z",
+      "updatedAt": "2014-02-10T19:27:00.000Z",
+      "appVersion": "4.1.0",
+      "deviceLabel": "Android x86"
+    },
+    {
+      "id": "seed-angrybirds-007",
+      "packageId": "com.rovio.angrybirds",
+      "userId": "seed-user-007",
+      "authorName": "Marta V.",
+      "title": "Soundtrack is still iconic",
+      "text": "You hear one launch sound and immediately know what game it is. That matters more than people admit.",
+      "rating": 5,
+      "createdAt": "2014-02-08T15:54:00.000Z",
+      "updatedAt": "2014-02-08T15:54:00.000Z",
+      "appVersion": "4.1.0",
+      "deviceLabel": "LG G2"
+    },
+    {
+      "id": "seed-angrybirds-008",
+      "packageId": "com.rovio.angrybirds",
+      "userId": "seed-user-008",
+      "authorName": "Paul D.",
+      "title": "A classic worth keeping installed",
+      "text": "Not flashy anymore, but the level design still holds up and the battery drain is low.",
+      "rating": 4,
+      "createdAt": "2014-02-06T21:06:00.000Z",
+      "updatedAt": "2014-02-06T21:06:00.000Z",
+      "appVersion": "4.1.0",
+      "deviceLabel": "Moto G"
+    }
+  ]
+}

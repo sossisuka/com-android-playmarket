@@ -33,6 +33,26 @@ type SummaryApp = {
   trailerImage: string;
   trailerUrl: string;
   reviews: number;
+  ratingValue: number;
+  ratingCountText: string;
+};
+
+type ReviewRecord = {
+  id: string;
+  packageId: string;
+  userId: string;
+  authorName: string;
+  title: string;
+  text: string;
+  rating: number;
+  createdAt: string;
+  updatedAt: string;
+  appVersion?: string;
+  deviceLabel?: string;
+};
+
+type ReviewsDb = {
+  reviews: ReviewRecord[];
 };
 
 type Cache = {
@@ -88,6 +108,9 @@ const APPS_FILE =
 const USERS_DB_FILE =
   process.env.USERS_DB_FILE ??
   path.resolve(import.meta.dir, "./data/users.db.ts");
+const REVIEWS_FILE =
+  process.env.REVIEWS_FILE ??
+  path.resolve(import.meta.dir, "./data/reviews.json");
 const UNSUPPORTED_APPS_DIR = path.resolve(import.meta.dir, "./data");
 const UNSUPPORTED_APPS_FILE = path.join(
   UNSUPPORTED_APPS_DIR,
@@ -198,6 +221,8 @@ let cache: Cache | null = null;
 let cacheLoadPromise: Promise<Cache> | null = null;
 let usersDbCache: UsersDb | null = null;
 let usersDbLoadPromise: Promise<UsersDb> | null = null;
+let reviewsDbCache: ReviewsDb | null = null;
+let reviewsDbLoadPromise: Promise<ReviewsDb> | null = null;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -310,6 +335,152 @@ async function saveUsersDb(db: UsersDb): Promise<void> {
   usersDbCache = db;
   await mkdir(path.dirname(USERS_DB_FILE), { recursive: true });
   await writeFile(USERS_DB_FILE, serializeUsersDb(db), "utf8");
+}
+
+function normalizeReviewRating(value: unknown): number {
+  const rating = Number(value);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) return 0;
+  return rating;
+}
+
+function normalizeReviewRecord(value: unknown): ReviewRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const packageId = String(raw.packageId ?? "").trim();
+  const userId = String(raw.userId ?? "").trim();
+  const authorName = fixMojibake(String(raw.authorName ?? "").trim());
+  const title = fixMojibake(String(raw.title ?? "").trim());
+  const text = fixMojibake(String(raw.text ?? "").trim());
+  const rating = normalizeReviewRating(raw.rating);
+  if (!PACKAGE_ID_RE.test(packageId) || !userId || !authorName || !text) {
+    return null;
+  }
+  return {
+    id: String(raw.id ?? "").trim() || randomBytes(8).toString("hex"),
+    packageId,
+    userId,
+    authorName,
+    title,
+    text,
+    rating,
+    createdAt: String(raw.createdAt ?? nowIso()),
+    updatedAt: String(raw.updatedAt ?? raw.createdAt ?? nowIso()),
+    appVersion: String(raw.appVersion ?? "").trim(),
+    deviceLabel: String(raw.deviceLabel ?? "").trim(),
+  };
+}
+
+function normalizeReviewsDb(value: unknown): ReviewsDb {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { reviews: [] };
+  }
+  const raw = value as { reviews?: unknown };
+  return {
+    reviews: Array.isArray(raw.reviews)
+      ? raw.reviews
+          .map(normalizeReviewRecord)
+          .filter((item): item is ReviewRecord => Boolean(item))
+      : [],
+  };
+}
+
+async function ensureReviewsDbFile(): Promise<void> {
+  try {
+    await stat(REVIEWS_FILE);
+  } catch {
+    await mkdir(path.dirname(REVIEWS_FILE), { recursive: true });
+    await writeFile(
+      REVIEWS_FILE,
+      `${JSON.stringify({ reviews: [] }, null, 2)}\n`,
+      "utf8",
+    );
+  }
+}
+
+async function ensureReviewsDb(): Promise<ReviewsDb> {
+  if (reviewsDbCache) return reviewsDbCache;
+  if (reviewsDbLoadPromise) return reviewsDbLoadPromise;
+
+  reviewsDbLoadPromise = (async () => {
+    await ensureReviewsDbFile();
+    const fileText = await readFile(REVIEWS_FILE, "utf8");
+    reviewsDbCache = normalizeReviewsDb(JSON.parse(fileText));
+    return reviewsDbCache;
+  })();
+
+  try {
+    return await reviewsDbLoadPromise;
+  } finally {
+    reviewsDbLoadPromise = null;
+  }
+}
+
+async function saveReviewsDb(db: ReviewsDb): Promise<void> {
+  reviewsDbCache = db;
+  await mkdir(path.dirname(REVIEWS_FILE), { recursive: true });
+  await writeFile(
+    REVIEWS_FILE,
+    `${JSON.stringify(normalizeReviewsDb(db), null, 2)}\n`,
+    "utf8",
+  );
+}
+
+function reviewsForPackage(db: ReviewsDb, packageId: string): ReviewRecord[] {
+  return db.reviews
+    .filter((item) => item.packageId === packageId)
+    .sort(
+      (a, b) =>
+        Date.parse(b.updatedAt || b.createdAt || "") -
+          Date.parse(a.updatedAt || a.createdAt || "") ||
+        b.createdAt.localeCompare(a.createdAt),
+    );
+}
+
+function buildReviewSummary(reviews: ReviewRecord[]) {
+  const counts = new Map<number, number>([
+    [1, 0],
+    [2, 0],
+    [3, 0],
+    [4, 0],
+    [5, 0],
+  ]);
+  let total = 0;
+  let sum = 0;
+
+  for (const review of reviews) {
+    const rating = normalizeReviewRating(review.rating);
+    counts.set(rating, (counts.get(rating) ?? 0) + 1);
+    total += 1;
+    sum += rating;
+  }
+
+  const averageRating = total > 0 ? Number((sum / total).toFixed(1)) : 0;
+  const ratingCountText =
+    total <= 0 ? "0 reviews" : total === 1 ? "1 review" : `${total} reviews`;
+
+  return {
+    totalReviews: total,
+    averageRating,
+    ratingCountText,
+    histogram: [5, 4, 3, 2, 1].map((stars) => ({
+      stars,
+      count: counts.get(stars) ?? 0,
+    })),
+  };
+}
+
+function applyReviewSummaryToRawApp(
+  app: RawApp,
+  summary: ReturnType<typeof buildReviewSummary>,
+): RawApp {
+  return {
+    ...app,
+    reviews: summary.totalReviews,
+    ratingValue: summary.averageRating,
+    ratingCountText: summary.ratingCountText,
+  };
 }
 
 type UnsupportedAppsDb = Record<string, string[]>;
@@ -566,6 +737,8 @@ function pickSummary(app: RawApp): SummaryApp {
     trailerImage: String(app.trailerImage ?? ""),
     trailerUrl: String(app.trailerUrl ?? ""),
     reviews: Number(app.reviews ?? 0),
+    ratingValue: Number(app.ratingValue ?? 0),
+    ratingCountText: fixMojibake(String(app.ratingCountText ?? "")),
   };
 }
 
@@ -1299,6 +1472,7 @@ Bun.serve({
       const startedAt = logRequestStart(req);
       const c = await ensureCache();
       const iconIndex = await getLocalIconIndex();
+      const reviewsDb = await ensureReviewsDb();
       const url = new URL(req.url);
       const id = decodeURIComponent(
         url.pathname.replace(/^\/apps\//, ""),
@@ -1316,10 +1490,182 @@ Bun.serve({
         return response;
       }
 
+      const packageReviews = reviewsForPackage(reviewsDb, id);
+      const detailedApp =
+        packageReviews.length > 0
+          ? applyReviewSummaryToRawApp(app, buildReviewSummary(packageReviews))
+          : app;
       const response = okJson({
-        app: withResolvedRawIcon(req, iconIndex, normalizeAppDetails(app)),
+        app: withResolvedRawIcon(
+          req,
+          iconIndex,
+          normalizeAppDetails(detailedApp),
+        ),
       });
       logRequestEnd(req, 200, startedAt, `id=${id}`);
+      return response;
+    },
+    "/reviews/:appId": async (req) => {
+      const startedAt = logRequestStart(req);
+      const c = await ensureCache();
+      const url = new URL(req.url);
+      const appId = decodeURIComponent(
+        url.pathname.replace(/^\/reviews\//, ""),
+      ).trim();
+      if (!appId) {
+        const response = badRequest("appId is required");
+        logRequestEnd(req, 400, startedAt);
+        return response;
+      }
+      if (!c.byId.has(appId)) {
+        const response = okJson({ error: "app not found" }, { status: 404 });
+        logRequestEnd(req, 404, startedAt, `appId=${appId}`);
+        return response;
+      }
+
+      if (req.method === "GET") {
+        const auth = await requireAuth(req);
+        const offset = Math.max(
+          0,
+          Number(url.searchParams.get("offset") ?? "0") || 0,
+        );
+        const limit = Math.min(
+          20,
+          Math.max(1, Number(url.searchParams.get("limit") ?? "5") || 5),
+        );
+        const db = await ensureReviewsDb();
+        const packageReviews = reviewsForPackage(db, appId);
+        const summary = buildReviewSummary(packageReviews);
+        const items = packageReviews.slice(offset, offset + limit);
+        const myReview = auth
+          ? (packageReviews.find((item) => item.userId === auth.user.id) ??
+            null)
+          : null;
+
+        const response = okJson({
+          appId,
+          offset,
+          limit,
+          hasMore: offset + items.length < packageReviews.length,
+          totalReviews: summary.totalReviews,
+          averageRating: summary.averageRating,
+          ratingCountText: summary.ratingCountText,
+          histogram: summary.histogram,
+          myReview,
+          items,
+        });
+        logRequestEnd(
+          req,
+          200,
+          startedAt,
+          `appId=${appId} offset=${offset} limit=${limit} returned=${items.length} total=${packageReviews.length} userId=${auth?.user.id ?? "-"}`,
+        );
+        return response;
+      }
+
+      if (req.method === "POST") {
+        const auth = await requireAuth(req);
+        if (!auth) {
+          const response = okJson({ error: "unauthorized" }, { status: 401 });
+          logRequestEnd(req, 401, startedAt);
+          return response;
+        }
+        const body = await readJsonBody<{
+          rating?: number;
+          title?: string;
+          text?: string;
+          appVersion?: string;
+          deviceLabel?: string;
+        }>(req);
+        if (!body) {
+          const response = badRequest("invalid json body");
+          logRequestEnd(req, 400, startedAt);
+          return response;
+        }
+
+        const rating = normalizeReviewRating(body.rating);
+        const title = fixMojibake(String(body.title ?? "").trim()).slice(
+          0,
+          120,
+        );
+        const text = fixMojibake(String(body.text ?? "").trim()).slice(0, 4000);
+        const appVersion = String(body.appVersion ?? "")
+          .trim()
+          .slice(0, 64);
+        const deviceLabel = String(body.deviceLabel ?? "")
+          .trim()
+          .slice(0, 64);
+
+        if (!rating) {
+          const response = badRequest("rating must be between 1 and 5");
+          logRequestEnd(req, 400, startedAt, `appId=${appId}`);
+          return response;
+        }
+        if (!text) {
+          const response = badRequest("text is required");
+          logRequestEnd(req, 400, startedAt, `appId=${appId}`);
+          return response;
+        }
+
+        const db = await ensureReviewsDb();
+        const existingIndex = db.reviews.findIndex(
+          (item) => item.packageId === appId && item.userId === auth.user.id,
+        );
+        const authorName = userPublic(auth.user).name;
+        const now = nowIso();
+        const nextReview: ReviewRecord = {
+          id:
+            existingIndex >= 0
+              ? db.reviews[existingIndex]!.id
+              : randomBytes(10).toString("hex"),
+          packageId: appId,
+          userId: auth.user.id,
+          authorName,
+          title,
+          text,
+          rating,
+          createdAt:
+            existingIndex >= 0 ? db.reviews[existingIndex]!.createdAt : now,
+          updatedAt: now,
+          appVersion,
+          deviceLabel,
+        };
+
+        if (existingIndex >= 0) {
+          db.reviews[existingIndex] = nextReview;
+        } else {
+          db.reviews.push(nextReview);
+        }
+        await saveReviewsDb(db);
+
+        const packageReviews = reviewsForPackage(db, appId);
+        const summary = buildReviewSummary(packageReviews);
+        const items = packageReviews.slice(0, 5);
+        const response = okJson({
+          ok: true,
+          appId,
+          review: nextReview,
+          offset: 0,
+          limit: 5,
+          totalReviews: summary.totalReviews,
+          averageRating: summary.averageRating,
+          ratingCountText: summary.ratingCountText,
+          histogram: summary.histogram,
+          hasMore: packageReviews.length > items.length,
+          items,
+          myReview: nextReview,
+        });
+        logRequestEnd(
+          req,
+          200,
+          startedAt,
+          `appId=${appId} userId=${auth.user.id} created=${existingIndex < 0}`,
+        );
+        return response;
+      }
+
+      const response = badRequest("method must be GET or POST");
+      logRequestEnd(req, 400, startedAt, `method=${req.method}`);
       return response;
     },
     "/home": async (req) => {

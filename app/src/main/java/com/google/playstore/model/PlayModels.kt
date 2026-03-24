@@ -116,6 +116,37 @@ data class FavoriteMutationResult(
     val isFavorite: Boolean
 )
 
+data class AppReview(
+    val id: String,
+    val packageId: String,
+    val authorName: String,
+    val title: String,
+    val text: String,
+    val rating: Int,
+    val createdAt: String,
+    val updatedAt: String,
+    val appVersion: String = "",
+    val deviceLabel: String = "",
+    val mine: Boolean = false
+)
+
+data class ReviewHistogramEntry(
+    val stars: Int,
+    val count: Long
+)
+
+data class AppReviewsPage(
+    val items: List<AppReview>,
+    val myReview: AppReview?,
+    val averageRating: Float,
+    val totalReviews: Long,
+    val ratingCountText: String,
+    val histogram: List<ReviewHistogramEntry>,
+    val hasMore: Boolean,
+    val offset: Int,
+    val limit: Int
+)
+
 fun tr(ru: String, en: String): String {
     return if (Locale.getDefault().language.lowercase().startsWith("ru")) ru else en
 }

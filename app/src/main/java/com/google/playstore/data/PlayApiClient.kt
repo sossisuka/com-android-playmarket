@@ -7,10 +7,13 @@ import com.google.playstore.model.HomeBanner
 import com.google.playstore.model.HomeFeedSection
 import com.google.playstore.model.HomePayload
 import com.google.playstore.model.ApiPage
+import com.google.playstore.model.AppReview
+import com.google.playstore.model.AppReviewsPage
 import com.google.playstore.model.AuthSession
 import com.google.playstore.model.AuthUser
 import com.google.playstore.model.FavoriteAppsPayload
 import com.google.playstore.model.FavoriteMutationResult
+import com.google.playstore.model.ReviewHistogramEntry
 import com.google.playstore.model.StoreApp
 import java.io.File
 import java.io.IOException
@@ -161,6 +164,47 @@ class PlayApiClient(private val baseUrl: String) {
         val json = getJson("/apps/${encodeUrlPart(appId)}")
         if (!json.has("app")) return null
         return mapJsonToStoreApp(json.optJSONObject("app") ?: return null, includeMedia = true)
+    }
+
+    fun readReviews(
+        appId: String,
+        offset: Int = 0,
+        limit: Int = 5,
+        authToken: String? = null
+    ): AppReviewsPage {
+        val safeOffset = offset.coerceAtLeast(0)
+        val safeLimit = limit.coerceIn(1, 20)
+        val json = requestJson(
+            "GET",
+            "/reviews/${encodeUrlPart(appId)}?offset=$safeOffset&limit=$safeLimit",
+            authToken = authToken
+        )
+        return mapAppReviewsPage(json)
+    }
+
+    fun submitReview(
+        token: String,
+        appId: String,
+        rating: Int,
+        title: String,
+        text: String,
+        appVersion: String = "",
+        deviceLabel: String = ""
+    ): AppReviewsPage {
+        val payload = JSONObject().apply {
+            put("rating", rating)
+            put("title", title)
+            put("text", text)
+            if (appVersion.isNotBlank()) put("appVersion", appVersion)
+            if (deviceLabel.isNotBlank()) put("deviceLabel", deviceLabel)
+        }
+        val json = requestJson(
+            "POST",
+            "/reviews/${encodeUrlPart(appId)}",
+            body = payload,
+            authToken = token
+        )
+        return mapAppReviewsPage(json)
     }
 
     fun downloadApkToFile(
@@ -419,6 +463,56 @@ private fun mapAuthUser(obj: JSONObject?): AuthUser {
         createdAt = safe.optString("createdAt"),
         favoriteAppIds = safe.optJSONArray("favoriteAppIds").toStringList(),
         libraryAppIds = safe.optJSONArray("libraryAppIds").toStringList()
+    )
+}
+
+private fun mapAppReviewsPage(obj: JSONObject): AppReviewsPage {
+    val itemsJson = obj.optJSONArray("items") ?: JSONArray()
+    val histogramJson = obj.optJSONArray("histogram") ?: JSONArray()
+    val items = ArrayList<AppReview>(itemsJson.length())
+    val histogram = ArrayList<ReviewHistogramEntry>(histogramJson.length())
+
+    for (i in 0 until itemsJson.length()) {
+        val item = itemsJson.optJSONObject(i) ?: continue
+        items.add(mapAppReview(item))
+    }
+    for (i in 0 until histogramJson.length()) {
+        val item = histogramJson.optJSONObject(i) ?: continue
+        histogram.add(
+            ReviewHistogramEntry(
+                stars = item.optInt("stars", 0),
+                count = item.optLong("count", 0L)
+            )
+        )
+    }
+
+    val myReview = obj.optJSONObject("myReview")?.let(::mapAppReview)
+
+    return AppReviewsPage(
+        items = items,
+        myReview = myReview?.copy(mine = true),
+        averageRating = obj.optDouble("averageRating", 0.0).toFloat(),
+        totalReviews = obj.optLong("totalReviews", 0L),
+        ratingCountText = fixMojibake(obj.optString("ratingCountText", "")),
+        histogram = histogram,
+        hasMore = obj.optBoolean("hasMore", false),
+        offset = obj.optInt("offset", 0),
+        limit = obj.optInt("limit", items.size)
+    )
+}
+
+private fun mapAppReview(obj: JSONObject): AppReview {
+    return AppReview(
+        id = obj.optString("id"),
+        packageId = obj.optString("packageId"),
+        authorName = fixMojibake(obj.optString("authorName", "")),
+        title = fixMojibake(obj.optString("title", "")),
+        text = fixMojibake(obj.optString("text", "")),
+        rating = obj.optInt("rating", 0),
+        createdAt = obj.optString("createdAt", ""),
+        updatedAt = obj.optString("updatedAt", ""),
+        appVersion = obj.optString("appVersion", ""),
+        deviceLabel = obj.optString("deviceLabel", "")
     )
 }
 

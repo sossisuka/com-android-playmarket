@@ -77,7 +77,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
@@ -121,9 +125,13 @@ import com.google.playstore.model.DrawerSection
 import com.google.playstore.model.HomeBanner
 import com.google.playstore.model.HomePayload
 import com.google.playstore.model.HomeTab
+import com.google.playstore.model.AppReview
+import com.google.playstore.model.AppReviewsPage
+import com.google.playstore.model.ReviewHistogramEntry
 import com.google.playstore.model.StoreApp
 import com.google.playstore.model.tr
 import com.google.playstore.ui.theme.PlayMarketTheme
+import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
@@ -682,6 +690,8 @@ fun PlayMarketScreen() {
                         AppDetailsPage(
                             app = detailsApp,
                             catalogApps = catalogApps,
+                            apiClient = apiClient,
+                            authToken = authToken,
                             loadingDetails = loadingDetails,
                             isAuthenticated = authToken.orEmpty().isNotBlank(),
                             unsupportedOnCurrentDeviceApi = detailsApp.id in unsupportedAppIdsForDeviceApi,
@@ -2649,6 +2659,8 @@ private fun SearchResultsPage(
 private fun AppDetailsPage(
     app: StoreApp,
     catalogApps: List<StoreApp>,
+    apiClient: PlayApiClient,
+    authToken: String?,
     loadingDetails: Boolean,
     isAuthenticated: Boolean,
     unsupportedOnCurrentDeviceApi: Boolean,
@@ -3028,14 +3040,7 @@ private fun AppDetailsPage(
                     Text(stringResource(R.string.details_screenshots_subtitle), color = Color(0xFF7B7B7B), fontSize = 12.sp)
                 }
                 if (loadingDetails) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 16.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        LegacyPlayLoadingSpinner(size = 22.dp)
-                    }
+                    LegacyDetailsScreenshotsSkeleton()
                 } else {
                     LazyRow(
                         state = screenshotsListState,
@@ -3082,67 +3087,97 @@ private fun AppDetailsPage(
                     fontSize = 24.sp,
                     fontWeight = FontWeight.Light
                 )
-                Text(
-                    text = app.subtitle.ifBlank { app.publisher },
-                    color = Color(0xFF4D4D4D),
-                    fontSize = 13.sp
-                )
-                if (app.updatedAt.isNotBlank()) {
+                if (loadingDetails) {
+                    LegacyDetailsDescriptionSkeleton()
+                } else {
                     Text(
-                        text = app.updatedAt,
-                        color = Color(0xFF8A8A8A),
-                        fontSize = 11.sp
+                        text = app.subtitle.ifBlank { app.publisher },
+                        color = Color(0xFF4D4D4D),
+                        fontSize = 13.sp
                     )
+                    if (app.updatedAt.isNotBlank()) {
+                        Text(
+                            text = app.updatedAt,
+                            color = Color(0xFF8A8A8A),
+                            fontSize = 11.sp
+                        )
+                    }
+                    Text(descriptionText, color = Color(0xFF555555), fontSize = 13.sp)
                 }
-                Text(descriptionText, color = Color(0xFF555555), fontSize = 13.sp)
             }
         }
-        if (whatsNewText.isNotBlank()) {
+        if (loadingDetails || whatsNewText.isNotBlank()) {
             item {
                 DetailsContentBlock(
                     title = stringResource(R.string.details_whats_new_title),
-                    subtitle = app.updatedAt.ifBlank { null }
+                    subtitle = if (loadingDetails) null else app.updatedAt.ifBlank { null }
                 ) {
-                    Text(whatsNewText, color = Color(0xFF555555), fontSize = 13.sp)
+                    if (loadingDetails) {
+                        LegacyDetailsTextBlockSkeleton(lineCount = 3)
+                    } else {
+                        Text(whatsNewText, color = Color(0xFF555555), fontSize = 13.sp)
+                    }
                 }
             }
         }
         item {
             DetailsContentBlock(title = stringResource(R.string.details_info_title)) {
-                DetailMetaRow(stringResource(R.string.details_category_label), categoryLabelRu(app.category))
-                DetailMetaRow(stringResource(R.string.details_developer_label), app.publisher)
-                DetailMetaRow(stringResource(R.string.details_age_label), app.contentRating.ifBlank { stringResource(R.string.details_everyone) })
-                if (app.version.isNotBlank()) {
-                    DetailMetaRow(stringResource(R.string.details_version_label), app.version)
-                }
-                if (app.sizeLabel.isNotBlank()) {
-                    DetailMetaRow(stringResource(R.string.details_size_label), app.sizeLabel)
-                }
-                if (app.requiresAndroid.isNotBlank()) {
-                    DetailMetaRow("Android", app.requiresAndroid)
-                }
-            }
-        }
-        if (installProgress == null) {
-            item {
-                DetailsContentBlock(
-                    title = stringResource(R.string.details_reviews_title),
-                    subtitle = stringResource(R.string.details_reviews_subtitle)
-                ) {
-                    LegacyReviewsBlock(app)
+                if (loadingDetails) {
+                    LegacyDetailsInfoSkeleton()
+                } else {
+                    DetailMetaRow(stringResource(R.string.details_category_label), categoryLabelRu(app.category))
+                    DetailMetaRow(stringResource(R.string.details_developer_label), app.publisher)
+                    DetailMetaRow(stringResource(R.string.details_age_label), app.contentRating.ifBlank { stringResource(R.string.details_everyone) })
+                    if (app.version.isNotBlank()) {
+                        DetailMetaRow(stringResource(R.string.details_version_label), app.version)
+                    }
+                    if (app.sizeLabel.isNotBlank()) {
+                        DetailMetaRow(stringResource(R.string.details_size_label), app.sizeLabel)
+                    }
+                    if (app.requiresAndroid.isNotBlank()) {
+                        DetailMetaRow("Android", app.requiresAndroid)
+                    }
                 }
             }
         }
-        if (similarApps.isNotEmpty()) {
+        item {
+            DetailsContentBlock(
+                title = stringResource(R.string.details_reviews_title),
+                subtitle = stringResource(R.string.details_reviews_subtitle)
+            ) {
+                if (loadingDetails) {
+                    LegacyReviewsSectionSkeleton()
+                } else {
+                    LegacyReviewsSection(
+                        app = app,
+                        apiClient = apiClient,
+                        authToken = authToken,
+                        isAuthenticated = isAuthenticated,
+                        onRequireSignIn = onRequireSignIn
+                    )
+                }
+            }
+        }
+        if (loadingDetails || similarApps.isNotEmpty()) {
             item {
                 DetailsContentBlock(title = stringResource(R.string.details_similar_apps_title)) {
-                    HorizontalAppsRow(similarApps, installedAppsRefreshKey, activeInstallSession, onAppClick)
+                    if (loadingDetails) {
+                        LegacyHorizontalAppsSkeleton()
+                    } else {
+                        HorizontalAppsRow(similarApps, installedAppsRefreshKey, activeInstallSession, onAppClick)
+                    }
                 }
             }
         }
-        if (moreFromDeveloper.isNotEmpty()) {
+        if (loadingDetails || moreFromDeveloper.isNotEmpty()) {
             item { DetailsSectionHeader("Ещё от разработчика", null) }
-            item { HorizontalAppsRow(moreFromDeveloper, installedAppsRefreshKey, activeInstallSession, onAppClick) }
+            item {
+                if (loadingDetails) {
+                    LegacyHorizontalAppsSkeleton()
+                } else {
+                    HorizontalAppsRow(moreFromDeveloper, installedAppsRefreshKey, activeInstallSession, onAppClick)
+                }
+            }
         }
     }
 }
@@ -3674,24 +3709,557 @@ private fun DetailMetaRow(label: String, value: String) {
 }
 
 @Composable
-private fun LegacyReviewsBlock(app: StoreApp) {
-    val averageRating = app.ratingValue.takeIf { it > 0f } ?: derivedAverageRating(app.reviews)
-    val ratingCountLabel = app.ratingCountText.ifBlank {
-        when {
-            app.reviews <= 0L -> "Нет оценок"
-            app.reviews == 1L -> "1 отзыв"
-            else -> "${app.reviews} отзывов"
+private fun rememberSkeletonBrush(): Brush {
+    val transition = rememberInfiniteTransition(label = "skeleton")
+    val shift by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 900f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1150, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "skeletonShift"
+    )
+    return Brush.linearGradient(
+        colors = listOf(
+            Color(0xFFE7E7E7),
+            Color(0xFFF4F4F4),
+            Color(0xFFE1E1E1)
+        ),
+        start = Offset(shift - 260f, shift - 120f),
+        end = Offset(shift, shift + 120f)
+    )
+}
+
+@Composable
+private fun LegacySkeletonBlock(
+    modifier: Modifier,
+    cornerRadius: Dp = 3.dp
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(cornerRadius))
+            .background(rememberSkeletonBrush())
+    )
+}
+
+@Composable
+private fun LegacySkeletonTextLine(
+    widthFraction: Float,
+    height: Dp = 12.dp,
+    modifier: Modifier = Modifier
+) {
+    LegacySkeletonBlock(
+        modifier = modifier
+            .fillMaxWidth(widthFraction)
+            .height(height)
+    )
+}
+
+@Composable
+private fun LegacySkeletonStarRow(
+    count: Int = 5,
+    size: Dp = 13.dp
+) {
+    val transition = rememberInfiniteTransition(label = "skeletonStars")
+    val alpha by transition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 0.58f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "skeletonStarAlpha"
+    )
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        repeat(count) { index ->
+            Image(
+                painter = painterResource(R.drawable.ic_skeleton_star),
+                contentDescription = null,
+                colorFilter = ColorFilter.tint(Color(0xFFCFCFCF)),
+                modifier = Modifier
+                    .size(size)
+                    .graphicsLayer(alpha = alpha)
+            )
+            if (index < count - 1) {
+                Spacer(Modifier.width(2.dp))
+            }
         }
     }
-    val histogramRows = remember(app.reviews, averageRating) {
-        buildReviewHistogramRows(app.reviews, averageRating)
+}
+
+@Composable
+private fun LegacyDetailsScreenshotsSkeleton() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        LegacySkeletonBlock(
+            modifier = Modifier
+                .weight(1.3f)
+                .height(180.dp),
+            cornerRadius = 2.dp
+        )
+        LegacySkeletonBlock(
+            modifier = Modifier
+                .width(104.dp)
+                .height(180.dp),
+            cornerRadius = 2.dp
+        )
+        LegacySkeletonBlock(
+            modifier = Modifier
+                .width(104.dp)
+                .height(180.dp),
+            cornerRadius = 2.dp
+        )
+    }
+}
+
+@Composable
+private fun LegacyDetailsDescriptionSkeleton() {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LegacySkeletonTextLine(widthFraction = 0.48f, height = 12.dp)
+        LegacySkeletonTextLine(widthFraction = 0.22f, height = 10.dp)
+        LegacyDetailsTextBlockSkeleton(lineCount = 5)
+    }
+}
+
+@Composable
+private fun LegacyDetailsTextBlockSkeleton(
+    lineCount: Int,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        repeat(lineCount) { index ->
+            val fraction = when (index) {
+                lineCount - 1 -> 0.62f
+                0 -> 0.96f
+                1 -> 0.9f
+                else -> 0.98f
+            }
+            LegacySkeletonTextLine(widthFraction = fraction)
+        }
+    }
+}
+
+@Composable
+private fun LegacyDetailsInfoSkeleton() {
+    Column {
+        repeat(5) { index ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                LegacySkeletonBlock(
+                    modifier = Modifier
+                        .width(86.dp)
+                        .height(12.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                LegacySkeletonBlock(
+                    modifier = Modifier
+                        .fillMaxWidth(
+                            when (index) {
+                                0 -> 0.42f
+                                1 -> 0.56f
+                                2 -> 0.28f
+                                3 -> 0.2f
+                                else -> 0.3f
+                            }
+                        )
+                        .height(12.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyHorizontalAppsSkeleton() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        repeat(4) {
+            Column(
+                modifier = Modifier.width(98.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                LegacySkeletonBlock(
+                    modifier = Modifier
+                        .size(88.dp)
+                        .clip(RoundedCornerShape(8.dp)),
+                    cornerRadius = 8.dp
+                )
+                LegacySkeletonTextLine(widthFraction = 0.88f, height = 11.dp)
+                LegacySkeletonTextLine(widthFraction = 0.56f, height = 10.dp)
+                LegacySkeletonStarRow(count = 5, size = 10.dp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyReviewsSectionSkeleton() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(122.dp)
+                    .background(Color(0xFFB2CB39))
+                    .padding(1.dp)
+            ) {
+                LegacySkeletonBlock(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(26.dp),
+                    cornerRadius = 0.dp
+                )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.White)
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    LegacySkeletonBlock(
+                        modifier = Modifier
+                            .width(54.dp)
+                            .height(30.dp)
+                    )
+                    LegacySkeletonStarRow()
+                    LegacySkeletonBlock(
+                        modifier = Modifier
+                            .width(66.dp)
+                            .height(11.dp)
+                    )
+                }
+            }
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 12.dp, top = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                repeat(5) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        LegacySkeletonBlock(
+                            modifier = Modifier
+                                .width(14.dp)
+                                .height(12.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        LegacySkeletonBlock(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        LegacySkeletonBlock(
+                            modifier = Modifier
+                                .width(38.dp)
+                                .height(12.dp)
+                        )
+                    }
+                }
+            }
+        }
+        repeat(2) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                LegacySkeletonBlock(
+                    modifier = Modifier.size(36.dp),
+                    cornerRadius = 18.dp
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    LegacySkeletonTextLine(widthFraction = 0.54f, height = 12.dp)
+                    LegacySkeletonStarRow()
+                    LegacySkeletonTextLine(widthFraction = 0.34f, height = 10.dp)
+                    LegacyDetailsTextBlockSkeleton(lineCount = 3)
+                }
+            }
+            HorizontalDivider(
+                color = Color(0x12000000),
+                modifier = Modifier.padding(horizontal = 10.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun LegacyReviewsSection(
+    app: StoreApp,
+    apiClient: PlayApiClient,
+    authToken: String?,
+    isAuthenticated: Boolean,
+    onRequireSignIn: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var reviewsPage by remember(app.id, authToken) { mutableStateOf<AppReviewsPage?>(null) }
+    var reviewsLoading by remember(app.id, authToken) { mutableStateOf(false) }
+    var reviewsLoadingMore by remember(app.id, authToken) { mutableStateOf(false) }
+    var reviewsSubmitting by remember(app.id, authToken) { mutableStateOf(false) }
+    var reviewsError by remember(app.id, authToken) { mutableStateOf<String?>(null) }
+    var formMessage by remember(app.id, authToken) { mutableStateOf<String?>(null) }
+    var ratingDraft by rememberSaveable(app.id, authToken) { mutableIntStateOf(0) }
+    var titleDraft by rememberSaveable(app.id, authToken) { mutableStateOf("") }
+    var textDraft by rememberSaveable(app.id, authToken) { mutableStateOf("") }
+    var formInitialized by remember(app.id, authToken) { mutableStateOf(false) }
+
+    fun syncFormFromReview(review: AppReview?) {
+        ratingDraft = review?.rating ?: 0
+        titleDraft = review?.title.orEmpty()
+        textDraft = review?.text.orEmpty()
+        formInitialized = true
     }
 
+    suspend fun loadReviewsPage(offset: Int, append: Boolean) {
+        if (append) {
+            reviewsLoadingMore = true
+        } else {
+            reviewsLoading = true
+        }
+        runCatching {
+            withContext(Dispatchers.IO) {
+                apiClient.readReviews(
+                    appId = app.id,
+                    offset = offset,
+                    limit = 5,
+                    authToken = authToken
+                )
+            }
+        }.onSuccess { page ->
+            val mergedPage = if (append && reviewsPage != null) {
+                mergeReviewPages(reviewsPage!!, page)
+            } else {
+                page
+            }
+            reviewsPage = mergedPage
+            reviewsError = null
+            if (isAuthenticated && !formInitialized) {
+                syncFormFromReview(mergedPage.myReview)
+            }
+        }.onFailure {
+            reviewsError = it.message
+        }
+        if (append) {
+            reviewsLoadingMore = false
+        } else {
+            reviewsLoading = false
+        }
+    }
+
+    LaunchedEffect(app.id, authToken) {
+        formMessage = null
+        formInitialized = false
+        loadReviewsPage(offset = 0, append = false)
+    }
+
+    val totalReviews = reviewsPage?.totalReviews ?: app.reviews
+    val averageRating = reviewsPage?.averageRating?.takeIf { it > 0f }
+        ?: app.ratingValue.takeIf { it > 0f }
+        ?: derivedAverageRating(totalReviews)
+    val histogramRows = remember(reviewsPage?.histogram, totalReviews, averageRating) {
+        val liveHistogram = reviewsPage?.histogram.orEmpty()
+        if (liveHistogram.isNotEmpty()) {
+            buildReviewHistogramRows(liveHistogram)
+        } else {
+            buildSyntheticReviewHistogramRows(totalReviews, averageRating)
+        }
+    }
+    val ratingCountLabel = formatReviewCountLabel(totalReviews)
+    val loadedReviews = reviewsPage?.items
+        .orEmpty()
+        .filterNot { review ->
+            isAuthenticated && review.id == reviewsPage?.myReview?.id
+        }
+    val hasVisibleReviews = loadedReviews.isNotEmpty()
+    val hasAnyReviews = totalReviews > 0L
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White)
+    ) {
+        LegacyReviewSummaryPanel(
+            averageRating = averageRating,
+            ratingCountLabel = ratingCountLabel,
+            histogramRows = histogramRows
+        )
+        if (isAuthenticated) {
+            LegacyReviewEditor(
+                hasExistingReview = reviewsPage?.myReview != null,
+                rating = ratingDraft,
+                title = titleDraft,
+                text = textDraft,
+                submitting = reviewsSubmitting,
+                message = formMessage,
+                onRatingChange = {
+                    ratingDraft = it
+                    formMessage = null
+                },
+                onTitleChange = {
+                    titleDraft = it
+                    formMessage = null
+                },
+                onTextChange = {
+                    textDraft = it
+                    formMessage = null
+                },
+                onSubmit = {
+                    val token = authToken.orEmpty()
+                    if (token.isBlank()) {
+                        onRequireSignIn()
+                        return@LegacyReviewEditor
+                    }
+                    when {
+                        ratingDraft <= 0 -> {
+                            formMessage = tr("Поставьте оценку от 1 до 5.", "Choose a rating from 1 to 5.")
+                        }
+                        textDraft.isBlank() -> {
+                            formMessage = tr("Введите текст отзыва.", "Enter review text.")
+                        }
+                        else -> {
+                            scope.launch {
+                                reviewsSubmitting = true
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        apiClient.submitReview(
+                                            token = token,
+                                            appId = app.id,
+                                            rating = ratingDraft,
+                                            title = titleDraft.trim(),
+                                            text = textDraft.trim(),
+                                            appVersion = app.version,
+                                            deviceLabel = Build.MODEL.orEmpty()
+                                        )
+                                    }
+                                }.onSuccess { page ->
+                                    reviewsPage = page
+                                    syncFormFromReview(page.myReview)
+                                    reviewsError = null
+                                    formMessage = tr("Отзыв сохранен.", "Review saved.")
+                                }.onFailure {
+                                    formMessage = it.message
+                                }
+                                reviewsSubmitting = false
+                            }
+                        }
+                    }
+                }
+            )
+        }
+        if (reviewsLoading && reviewsPage == null) {
+            LegacyReviewsSectionSkeleton()
+        } else {
+            if (!reviewsError.isNullOrBlank() && reviewsPage == null) {
+                LegacyReviewsInfoMessage(
+                    text = tr("Не удалось загрузить отзывы.", "Could not load reviews."),
+                    actionLabel = tr("Повторить", "Retry")
+                ) {
+                    scope.launch { loadReviewsPage(offset = 0, append = false) }
+                }
+            } else if (!hasAnyReviews) {
+                LegacyReviewsEmptyState(
+                    isAuthenticated = isAuthenticated,
+                    onRequireSignIn = onRequireSignIn
+                )
+            } else {
+                if (hasVisibleReviews) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp)
+                    ) {
+                        loadedReviews.forEach { review ->
+                            LegacyReviewListItem(review)
+                        }
+                    }
+                }
+                if (!reviewsError.isNullOrBlank() && reviewsPage != null) {
+                    Text(
+                        text = reviewsError!!,
+                        color = Color(0xFFC14F42),
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+                if (reviewsLoadingMore) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        LegacyPlayLoadingSpinner(size = 18.dp)
+                    }
+                } else if (reviewsPage?.hasMore == true) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        LegacyInlineActionButton(
+                            label = tr("ЕЩЕ ОТЗЫВЫ", "MORE REVIEWS"),
+                            enabled = true
+                        ) {
+                            scope.launch {
+                                loadReviewsPage(
+                                    offset = reviewsPage?.items?.size ?: 0,
+                                    append = true
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyReviewSummaryPanel(
+    averageRating: Float,
+    ratingCountLabel: String,
+    histogramRows: List<ReviewHistogramRow>
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color.White)
-            .padding(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 16.dp),
+            .padding(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 12.dp),
         verticalAlignment = Alignment.Top
     ) {
         Column(
@@ -3770,12 +4338,342 @@ private fun LegacyReviewsBlock(app: StoreApp) {
                         text = row.countLabel,
                         color = Color(0xFF7D7D7D),
                         fontSize = 11.sp,
-                        modifier = Modifier.width(54.dp).padding(start = 8.dp),
+                        modifier = Modifier
+                            .width(54.dp)
+                            .padding(start = 8.dp),
                         textAlign = TextAlign.End
                     )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun LegacyReviewEditor(
+    hasExistingReview: Boolean,
+    rating: Int,
+    title: String,
+    text: String,
+    submitting: Boolean,
+    message: String?,
+    onRatingChange: (Int) -> Unit,
+    onTitleChange: (String) -> Unit,
+    onTextChange: (String) -> Unit,
+    onSubmit: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp)
+            .background(Color(0xFFF7F7F7))
+            .border(1.dp, Color(0x12000000))
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = tr("МОЯ ОЦЕНКА", "MY RATING"),
+                color = Color(0xFF4D4D4D),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.weight(1f))
+            LegacyEditableRatingBar(
+                rating = rating,
+                enabled = !submitting,
+                onRatingChange = onRatingChange
+            )
+        }
+        LegacyReviewInput(
+            value = title,
+            onValueChange = onTitleChange,
+            placeholder = tr("Заголовок отзыва", "Review title"),
+            singleLine = true,
+            enabled = !submitting
+        )
+        LegacyReviewInput(
+            value = text,
+            onValueChange = onTextChange,
+            placeholder = tr("Поделитесь впечатлениями о приложении", "Share your thoughts about this app"),
+            singleLine = false,
+            enabled = !submitting,
+            minHeight = 92.dp
+        )
+        if (!message.isNullOrBlank()) {
+            Text(
+                text = message,
+                color = if (message.contains("saved", ignoreCase = true) || message.contains("сохран", ignoreCase = true)) {
+                    Color(0xFF7A8F22)
+                } else {
+                    Color(0xFFC14F42)
+                },
+                fontSize = 11.sp
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            LegacyInlineActionButton(
+                label = if (submitting) {
+                    tr("СОХРАНЕНИЕ…", "SAVING…")
+                } else if (hasExistingReview) {
+                    tr("ОБНОВИТЬ", "UPDATE")
+                } else {
+                    tr("ОПУБЛИКОВАТЬ", "POST")
+                },
+                enabled = !submitting
+            ) {
+                onSubmit()
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyReviewInput(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    singleLine: Boolean,
+    enabled: Boolean,
+    minHeight: Dp = 40.dp
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = minHeight)
+            .background(Color.White)
+            .border(1.dp, Color(0x22000000))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            enabled = enabled,
+            singleLine = singleLine,
+            textStyle = TextStyle(
+                color = Color(0xFF333333),
+                fontSize = 13.sp,
+                lineHeight = 18.sp
+            ),
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Sentences,
+                autoCorrectEnabled = true,
+                keyboardType = KeyboardType.Text,
+                imeAction = if (singleLine) ImeAction.Next else ImeAction.Default
+            ),
+            modifier = Modifier.fillMaxWidth(),
+            decorationBox = { innerTextField ->
+                if (value.isBlank()) {
+                    Text(
+                        text = placeholder,
+                        color = Color(0xFF9A9A9A),
+                        fontSize = 13.sp
+                    )
+                }
+                innerTextField()
+            }
+        )
+    }
+}
+
+@Composable
+private fun LegacyEditableRatingBar(
+    rating: Int,
+    enabled: Boolean,
+    onRatingChange: (Int) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        repeat(5) { index ->
+            Image(
+                painter = painterResource(
+                    if (index < rating.coerceIn(0, 5)) {
+                        R.drawable.ic_rating_star_active
+                    } else {
+                        R.drawable.ic_rating_star_inactive
+                    }
+                ),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(20.dp)
+                    .clickable(enabled = enabled) { onRatingChange(index + 1) }
+            )
+            if (index < 4) {
+                Spacer(Modifier.width(2.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyReviewsEmptyState(
+    isAuthenticated: Boolean,
+    onRequireSignIn: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = tr("Пока нет отзывов.", "No reviews yet."),
+            color = Color(0xFF666666),
+            fontSize = 13.sp
+        )
+        if (!isAuthenticated) {
+            Text(
+                text = tr("Войдите, чтобы оставить первый отзыв.", "Sign in to leave the first review."),
+                color = Color(0xFF3B78B6),
+                fontSize = 13.sp,
+                modifier = Modifier.clickable { onRequireSignIn() }
+            )
+        }
+    }
+}
+
+@Composable
+private fun LegacyReviewsInfoMessage(
+    text: String,
+    actionLabel: String,
+    onAction: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = text,
+            color = Color(0xFF666666),
+            fontSize = 13.sp
+        )
+        Text(
+            text = actionLabel,
+            color = Color(0xFF3B78B6),
+            fontSize = 13.sp,
+            modifier = Modifier.clickable { onAction() }
+        )
+    }
+}
+
+@Composable
+private fun LegacyReviewListItem(review: AppReview) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        LegacyReviewAvatar(authorName = review.authorName)
+        Spacer(Modifier.width(10.dp))
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            if (review.title.isNotBlank()) {
+                Text(
+                    text = review.title,
+                    color = Color(0xFF3F3F3F),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                LegacySmallRatingBar(rating = review.rating.toFloat())
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = review.authorName,
+                    color = Color(0xFF4E4E4E),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                val reviewDate = formatReviewDateLabel(review.updatedAt.ifBlank { review.createdAt })
+                if (reviewDate.isNotBlank()) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = reviewDate,
+                        color = Color(0xFF8A8A8A),
+                        fontSize = 11.sp,
+                        maxLines = 1
+                    )
+                }
+            }
+            val metadata = buildReviewMetadataLabel(review)
+            if (metadata.isNotBlank()) {
+                Text(
+                    text = metadata,
+                    color = Color(0xFF8E8E8E),
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Text(
+                text = review.text,
+                color = Color(0xFF5A5A5A),
+                fontSize = 13.sp,
+                lineHeight = 18.sp
+            )
+        }
+    }
+    HorizontalDivider(
+        color = Color(0x12000000),
+        modifier = Modifier.padding(horizontal = 10.dp)
+    )
+}
+
+@Composable
+private fun LegacyReviewAvatar(authorName: String) {
+    val initials = remember(authorName) { reviewInitials(authorName) }
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .background(Color(0xFFD6E097), RoundedCornerShape(18.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = initials,
+            color = Color(0xFF5A6620),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun LegacyInlineActionButton(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .background(if (enabled) Color(0xFFD0D83A) else Color(0xFFD8D8D8))
+            .clickable(enabled = enabled) { onClick() }
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
@@ -4258,7 +5156,28 @@ private fun formatAverageRating(rating: Float): String {
     return String.format(Locale.US, "%.1f", rounded)
 }
 
-private fun buildReviewHistogramRows(reviews: Long, rating: Float): List<ReviewHistogramRow> {
+private fun buildReviewHistogramRows(histogram: List<ReviewHistogramEntry>): List<ReviewHistogramRow> {
+    val countsByStars = histogram.associate { it.stars to it.count.coerceAtLeast(0L) }
+    val maxCount = countsByStars.values.maxOrNull()?.coerceAtLeast(1L) ?: 1L
+    val colors = listOf(
+        Color(0xFF9FC34D),
+        Color(0xFFB7BE54),
+        Color(0xFFD4A34A),
+        Color(0xFFD18F4A),
+        Color(0xFFD36B4B)
+    )
+    return listOf(5, 4, 3, 2, 1).mapIndexed { index, stars ->
+        val count = countsByStars[stars] ?: 0L
+        ReviewHistogramRow(
+            stars = stars,
+            fill = if (count <= 0L) 0f else count.toFloat() / maxCount.toFloat(),
+            countLabel = count.toString(),
+            barColor = colors[index]
+        )
+    }
+}
+
+private fun buildSyntheticReviewHistogramRows(reviews: Long, rating: Float): List<ReviewHistogramRow> {
     val total = reviews.coerceAtLeast(1L).toFloat()
     val ratios = when {
         rating >= 4.7f -> listOf(0.62f, 0.20f, 0.10f, 0.05f, 0.03f)
@@ -4285,6 +5204,73 @@ private fun buildReviewHistogramRows(reviews: Long, rating: Float): List<ReviewH
             barColor = colors[index]
         )
     }
+}
+
+private fun formatReviewCountLabel(count: Long): String {
+    if (count <= 0L) {
+        return tr("Нет отзывов", "No reviews")
+    }
+    return if (Locale.getDefault().language.lowercase().startsWith("ru")) {
+        val mod10 = count % 10
+        val mod100 = count % 100
+        when {
+            mod10 == 1L && mod100 != 11L -> "$count отзыв"
+            mod10 in 2L..4L && mod100 !in 12L..14L -> "$count отзыва"
+            else -> "$count отзывов"
+        }
+    } else {
+        if (count == 1L) "1 review" else "$count reviews"
+    }
+}
+
+private fun mergeReviewPages(
+    existing: AppReviewsPage,
+    incoming: AppReviewsPage
+): AppReviewsPage {
+    val mergedItems = buildList {
+        addAll(existing.items)
+        incoming.items.forEach { review ->
+            if (none { it.id == review.id }) add(review)
+        }
+    }
+    return incoming.copy(items = mergedItems)
+}
+
+private fun buildReviewMetadataLabel(review: AppReview): String {
+    return buildList {
+        if (review.mine) add(tr("Ваш отзыв", "Your review"))
+        if (review.appVersion.isNotBlank()) add(tr("Версия ${review.appVersion}", "Version ${review.appVersion}"))
+        if (review.deviceLabel.isNotBlank()) add(review.deviceLabel)
+    }.joinToString(" \u2022 ")
+}
+
+private fun reviewInitials(authorName: String): String {
+    val parts = authorName
+        .split(' ')
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+    if (parts.isEmpty()) return "?"
+    return parts
+        .take(2)
+        .joinToString("") { it.take(1).uppercase(Locale.getDefault()) }
+}
+
+private fun formatReviewDateLabel(raw: String): String {
+    if (raw.isBlank()) return ""
+    val patterns = listOf(
+        "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        "yyyy-MM-dd"
+    )
+    val parsed = patterns.firstNotNullOfOrNull { pattern ->
+        runCatching {
+            SimpleDateFormat(pattern, Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+                isLenient = false
+            }.parse(raw)
+        }.getOrNull()
+    } ?: return raw
+    return SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(parsed)
 }
 
 private fun categoryLabelRu(raw: String): String {
