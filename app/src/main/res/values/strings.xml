@@ -765,6 +765,33 @@ New reviews will be publicly linked to your Google+ profile. Your name on previo
     <string name="download_progress_bytes">^1/^2</string>
     <string name="download_pending">Starting download…</string>
     <string name="installing">Installing…</string>
+    <string name="install_notification_channel_name">App downloads</string>
+    <string
+        name="install_notification_channel_description"
+    >Shows progress for downloads and installations.</string>
+    <string name="install_notification_progress_bytes">%1$s / %2$s</string>
+    <string
+        name="install_complete_notification"
+    >Installed. Tap to open.</string>
+    <string
+        name="install_unknown_sources_required"
+    >Allow installation from unknown sources for this app, then try again.</string>
+    <string
+        name="install_download_failed_with_reason"
+    >Failed to download APK from local API: %1$s</string>
+    <string
+        name="install_prepare_failed"
+    >Failed to prepare APK for installation.</string>
+    <string
+        name="install_invalid_apk"
+    >Downloaded APK failed PackageManager verification (INVALID_APK). Please retry.</string>
+    <string
+        name="install_package_mismatch"
+    >APK package mismatch: expected %1$s, got %2$s.</string>
+    <string name="install_launch_failed">Failed to start APK installer.</string>
+    <string
+        name="install_timeout_error"
+    >Installation did not complete in time. Please try again.</string>
     <string name="uninstalling">Uninstalling…</string>
     <string name="ok">OK</string>
     <string name="close">Close</string>
@@ -1363,4 +1390,7 @@ Learn more in Google Settings > Verify apps."</string>
     <string name="auth_sign_out">Sign out</string>
     <string name="drawer_settings_icon">Settings</string>
     <string name="drawer_user_avatar">User profile</string>
+    <string
+        name="notification_installation_success_banner"
+    >App \"%1$s\" was installed successfully.</string>
 </resources>

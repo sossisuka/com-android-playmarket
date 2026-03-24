@@ -88,6 +88,11 @@ const APPS_FILE =
 const USERS_DB_FILE =
   process.env.USERS_DB_FILE ??
   path.resolve(import.meta.dir, "./data/users.db.ts");
+const UNSUPPORTED_APPS_DIR = path.resolve(import.meta.dir, "./data");
+const UNSUPPORTED_APPS_FILE = path.join(
+  UNSUPPORTED_APPS_DIR,
+  "unsupported_apps_api.json",
+);
 const ICONS_DIR = path.resolve(import.meta.dir, "./data/icons");
 const APK_DIR = path.resolve(import.meta.dir, "./data/apk");
 const APPS_PAGE_SIZE = 20;
@@ -305,6 +310,138 @@ async function saveUsersDb(db: UsersDb): Promise<void> {
   usersDbCache = db;
   await mkdir(path.dirname(USERS_DB_FILE), { recursive: true });
   await writeFile(USERS_DB_FILE, serializeUsersDb(db), "utf8");
+}
+
+type UnsupportedAppsDb = Record<string, string[]>;
+
+function normalizeApiLevel(value: unknown): number | null {
+  const apiLevel = Number(value);
+  if (!Number.isInteger(apiLevel) || apiLevel < 1 || apiLevel > 1000) {
+    return null;
+  }
+  return apiLevel;
+}
+
+function unsupportedAppsKey(apiLevel: number): string {
+  return `api${apiLevel}`;
+}
+
+function normalizeUnsupportedAppsDb(value: unknown): UnsupportedAppsDb {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => /^api\d+$/.test(key))
+    .map(([key, packageIds]) => [
+      key,
+      normalizeUnsupportedPackageIds(packageIds),
+    ]);
+  return Object.fromEntries(entries);
+}
+
+async function readLegacyUnsupportedAppsDb(): Promise<UnsupportedAppsDb> {
+  const migrated: UnsupportedAppsDb = {};
+
+  try {
+    const entries = await readdir(UNSUPPORTED_APPS_DIR, {
+      withFileTypes: true,
+    });
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const match = entry.name.match(/^unsupported_apps_api(\d+)\.json$/);
+      if (!match) continue;
+
+      const apiLevel = normalizeApiLevel(match[1]);
+      if (apiLevel == null) continue;
+
+      const key = unsupportedAppsKey(apiLevel);
+      const filePath = path.join(UNSUPPORTED_APPS_DIR, entry.name);
+      try {
+        const fileText = await readFile(filePath, "utf8");
+        const packageIds = normalizeUnsupportedPackageIds(
+          JSON.parse(fileText) as unknown,
+        );
+        migrated[key] = normalizeUnsupportedPackageIds([
+          ...(migrated[key] ?? []),
+          ...packageIds,
+        ]);
+      } catch {
+        if (!(key in migrated)) {
+          migrated[key] = [];
+        }
+      }
+    }
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code !== "ENOENT") throw error;
+  }
+
+  return migrated;
+}
+
+async function ensureUnsupportedAppsDbFile(): Promise<string> {
+  try {
+    await stat(UNSUPPORTED_APPS_FILE);
+  } catch {
+    await mkdir(path.dirname(UNSUPPORTED_APPS_FILE), { recursive: true });
+    const migrated = await readLegacyUnsupportedAppsDb();
+    await writeFile(
+      UNSUPPORTED_APPS_FILE,
+      `${JSON.stringify(migrated, null, 2)}\n`,
+      "utf8",
+    );
+  }
+  return UNSUPPORTED_APPS_FILE;
+}
+
+function normalizeUnsupportedPackageIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter((item) => PACKAGE_ID_RE.test(item)),
+    ),
+  ].sort();
+}
+
+async function readUnsupportedAppsDb(): Promise<UnsupportedAppsDb> {
+  const filePath = await ensureUnsupportedAppsDbFile();
+  const fileText = await readFile(filePath, "utf8");
+  try {
+    return normalizeUnsupportedAppsDb(JSON.parse(fileText) as unknown);
+  } catch {
+    return {};
+  }
+}
+
+async function saveUnsupportedAppsDb(db: UnsupportedAppsDb): Promise<void> {
+  const filePath = await ensureUnsupportedAppsDbFile();
+  await writeFile(
+    filePath,
+    `${JSON.stringify(normalizeUnsupportedAppsDb(db), null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function readUnsupportedApps(apiLevel: number): Promise<string[]> {
+  const db = await readUnsupportedAppsDb();
+  const key = unsupportedAppsKey(apiLevel);
+  if (!(key in db)) {
+    db[key] = [];
+    await saveUnsupportedAppsDb(db);
+  }
+  return db[key];
+}
+
+async function saveUnsupportedApps(
+  apiLevel: number,
+  packageIds: string[],
+): Promise<void> {
+  const db = await readUnsupportedAppsDb();
+  db[unsupportedAppsKey(apiLevel)] = normalizeUnsupportedPackageIds(packageIds);
+  await saveUnsupportedAppsDb(db);
 }
 
 function normalizeEmail(email: string): string {
@@ -1379,6 +1516,75 @@ Bun.serve({
         startedAt,
         `userId=${auth.user.id} appId=${appId} method=${req.method}`,
       );
+      return response;
+    },
+    "/unsupported-apps": async (req) => {
+      const startedAt = logRequestStart(req);
+      const url = new URL(req.url);
+
+      if (req.method === "GET") {
+        const apiLevel = normalizeApiLevel(url.searchParams.get("api"));
+        if (apiLevel == null) {
+          const response = badRequest("api must be a positive integer");
+          logRequestEnd(req, 400, startedAt);
+          return response;
+        }
+
+        const packageIds = await readUnsupportedApps(apiLevel);
+        const response = okJson({ apiLevel, packageIds });
+        logRequestEnd(
+          req,
+          200,
+          startedAt,
+          `api=${apiLevel} count=${packageIds.length}`,
+        );
+        return response;
+      }
+
+      if (req.method === "POST") {
+        const body = await readJsonBody<{
+          apiLevel?: number;
+          packageId?: string;
+        }>(req);
+        if (!body) {
+          const response = badRequest("invalid json body");
+          logRequestEnd(req, 400, startedAt);
+          return response;
+        }
+
+        const apiLevel = normalizeApiLevel(body.apiLevel);
+        const packageId = String(body.packageId ?? "").trim();
+
+        if (apiLevel == null) {
+          const response = badRequest("apiLevel must be a positive integer");
+          logRequestEnd(req, 400, startedAt);
+          return response;
+        }
+        if (!PACKAGE_ID_RE.test(packageId)) {
+          const response = badRequest("packageId is invalid");
+          logRequestEnd(req, 400, startedAt);
+          return response;
+        }
+
+        const nextPackageIds = [
+          ...(await readUnsupportedApps(apiLevel)),
+          packageId,
+        ];
+        await saveUnsupportedApps(apiLevel, nextPackageIds);
+
+        const packageIds = await readUnsupportedApps(apiLevel);
+        const response = okJson({ apiLevel, packageIds }, { status: 201 });
+        logRequestEnd(
+          req,
+          201,
+          startedAt,
+          `api=${apiLevel} packageId=${packageId} count=${packageIds.length}`,
+        );
+        return response;
+      }
+
+      const response = badRequest("method must be GET or POST");
+      logRequestEnd(req, 400, startedAt, `method=${req.method}`);
       return response;
     },
     "/icons/:file": async (req) => {

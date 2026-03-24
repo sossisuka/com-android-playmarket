@@ -15,6 +15,11 @@ internal interface ApkInstallDispatcher {
         launcher: ActivityResultLauncher<Intent>,
         onFailure: () -> Unit
     )
+
+    fun launchDirect(
+        apkUri: Uri,
+        legacyFilePath: String?
+    ): Boolean
 }
 
 internal fun createApkInstallDispatcher(context: Context): ApkInstallDispatcher {

@@ -1,11 +1,9 @@
 ﻿package com.google.playstore.ui
 
-import android.app.Activity
+import android.Manifest
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
-import android.provider.Settings
 import android.view.ContextThemeWrapper
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -65,7 +63,9 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -101,7 +101,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
@@ -109,7 +109,13 @@ import com.google.playstore.BuildConfig
 import com.google.playstore.R
 import com.google.playstore.data.AuthSessionStore
 import com.google.playstore.data.PlayApiClient
-import com.google.playstore.install.createApkInstallDispatcher
+import com.google.playstore.install.AppInstallCoordinator
+import com.google.playstore.install.INSTALL_STAGE_DOWNLOADING
+import com.google.playstore.install.INSTALL_STAGE_IDLE
+import com.google.playstore.install.INSTALL_STAGE_INSTALLING
+import com.google.playstore.install.INSTALL_STAGE_PREPARING
+import com.google.playstore.install.InstallSessionEvent
+import com.google.playstore.install.InstallSessionState
 import com.google.playstore.model.CatalogMode
 import com.google.playstore.model.DrawerSection
 import com.google.playstore.model.HomeBanner
@@ -118,23 +124,12 @@ import com.google.playstore.model.HomeTab
 import com.google.playstore.model.StoreApp
 import com.google.playstore.model.tr
 import com.google.playstore.ui.theme.PlayMarketTheme
-import java.io.File
 import java.util.Locale
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-private const val INSTALL_STAGE_IDLE = "idle"
-private const val INSTALL_STAGE_PREPARING = "preparing"
-private const val INSTALL_STAGE_DOWNLOADING = "downloading"
-private const val INSTALL_STAGE_INSTALLING = "installing"
-private const val INSTALL_PREPARATION_DURATION_MS = 3_000L
-private const val INSTALL_POLL_INTERVAL_MS = 500L
-private const val INSTALL_MONITOR_TIMEOUT_MS = 120_000L
-private const val EXTRA_INSTALL_RESULT = "android.intent.extra.INSTALL_RESULT"
 
 @Composable
 fun PlayMarketScreen() {
@@ -157,20 +152,43 @@ fun PlayMarketScreen() {
     var authToken by rememberSaveable { mutableStateOf<String?>(null) }
     var signedInName by rememberSaveable { mutableStateOf<String?>(null) }
     var signedInEmail by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingAppAfterAuth by remember { mutableStateOf<StoreApp?>(null) }
     var authInProgress by remember { mutableStateOf(false) }
     var wishlistAppIds by rememberSaveable { mutableStateOf(setOf<String>()) }
     var wishlistApps by remember { mutableStateOf<List<StoreApp>>(emptyList()) }
     var wishlistLoading by remember { mutableStateOf(false) }
     var wishlistError by remember { mutableStateOf<String?>(null) }
     var wishlistMutationInFlightIds by remember { mutableStateOf(setOf<String>()) }
+    var unsupportedAppIdsForDeviceApi by remember { mutableStateOf(setOf<String>()) }
+    var installedAppsRefreshKey by rememberSaveable { mutableIntStateOf(0) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val apiClient = remember { PlayApiClient(BuildConfig.PLAY_API_BASE_URL) }
     val context = LocalContext.current
+    val appContext = remember(context) { context.applicationContext }
+    val installCoordinator = remember(appContext, apiClient) {
+        AppInstallCoordinator(appContext, apiClient)
+    }
+    val installSession by installCoordinator.state.collectAsState()
     val authSessionStore = remember(context.applicationContext) {
         AuthSessionStore(context.applicationContext)
     }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { }
     val headerSearchMode = searchMode && selectedApp == null && authMode == null
+    val ensureNotificationPermission = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            runCatching {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
     val loadWishlistFromApi: suspend (String) -> Unit = { token ->
         if (token.isBlank()) {
             wishlistApps = emptyList()
@@ -204,6 +222,16 @@ fun PlayMarketScreen() {
         }.onFailure {
             error = it.message
             loading = false
+        }
+    }
+
+    LaunchedEffect(Build.VERSION.SDK_INT) {
+        runCatching {
+            withContext(Dispatchers.IO) {
+                apiClient.readUnsupportedApps(Build.VERSION.SDK_INT)
+            }
+        }.onSuccess {
+            unsupportedAppIdsForDeviceApi = it
         }
     }
 
@@ -286,8 +314,22 @@ fun PlayMarketScreen() {
             loadingDetails = false
         }
     }
-    val openAuthScreen: (LegacyAuthMode) -> Unit = { mode ->
+    val restorePendingAppAfterAuth: suspend () -> Unit = restorePendingAppAfterAuth@{
+        val appToRestore = pendingAppAfterAuth ?: return@restorePendingAppAfterAuth
+        pendingAppAfterAuth = null
+        selectedApp = appToRestore
+        loadingDetails = true
+        val details = runCatching {
+            withContext(Dispatchers.IO) {
+                apiClient.readById(appToRestore.id)
+            }
+        }.getOrNull()
+        selectedApp = details ?: appToRestore
+        loadingDetails = false
+    }
+    val openAuthScreen: (LegacyAuthMode, StoreApp?) -> Unit = { mode, returnToApp ->
         authMode = mode
+        pendingAppAfterAuth = returnToApp
         selectedApp = null
         selectedCategory = null
         showInstalledPackages = false
@@ -299,7 +341,7 @@ fun PlayMarketScreen() {
     val toggleWishlistForApp: (StoreApp) -> Unit = toggleWishlistForApp@{ app ->
         val token = authToken.orEmpty()
         if (token.isBlank()) {
-            openAuthScreen(LegacyAuthMode.SignIn)
+            openAuthScreen(LegacyAuthMode.SignIn, selectedApp ?: app)
             return@toggleWishlistForApp
         }
         val appId = app.id
@@ -343,11 +385,44 @@ fun PlayMarketScreen() {
             }
         }
     }
+    val reportUnsupportedAppForCurrentApi: (String) -> Unit = reportUnsupportedAppForCurrentApi@{ packageId ->
+        val normalizedPackageId = packageId.trim()
+        if (normalizedPackageId.isBlank()) return@reportUnsupportedAppForCurrentApi
+        if (normalizedPackageId in unsupportedAppIdsForDeviceApi) {
+            return@reportUnsupportedAppForCurrentApi
+        }
+
+        unsupportedAppIdsForDeviceApi = unsupportedAppIdsForDeviceApi + normalizedPackageId
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    apiClient.reportUnsupportedApp(Build.VERSION.SDK_INT, normalizedPackageId)
+                }
+            }.onSuccess {
+                unsupportedAppIdsForDeviceApi = it
+            }
+        }
+    }
     LaunchedEffect(showWishlist, authToken) {
         if (!showWishlist) return@LaunchedEffect
         val token = authToken.orEmpty()
         if (token.isBlank()) return@LaunchedEffect
         loadWishlistFromApi(token)
+    }
+    LaunchedEffect(installCoordinator) {
+        installCoordinator.events.collect { event ->
+            when (event) {
+                is InstallSessionEvent.Installed -> {
+                    installedAppsRefreshKey += 1
+                }
+                is InstallSessionEvent.AbiIncompatible -> {
+                    reportUnsupportedAppForCurrentApi(event.packageId)
+                }
+            }
+        }
+    }
+    DisposableEffect(installCoordinator) {
+        onDispose { installCoordinator.dispose() }
     }
 
     ModalNavigationDrawer(
@@ -382,7 +457,7 @@ fun PlayMarketScreen() {
                         DrawerSection.Editors -> {
                             val token = authToken.orEmpty()
                             if (token.isBlank()) {
-                                openAuthScreen(LegacyAuthMode.SignIn)
+                                openAuthScreen(LegacyAuthMode.SignIn, null)
                                 return@LegacyLeftDrawer
                             }
                             showInstalledPackages = false
@@ -405,8 +480,8 @@ fun PlayMarketScreen() {
                     searchQuery = ""
                     scope.launch { drawerState.close() }
                 },
-                onSignInClick = { openAuthScreen(LegacyAuthMode.SignIn) },
-                onRegisterClick = { openAuthScreen(LegacyAuthMode.Register) },
+                onSignInClick = { openAuthScreen(LegacyAuthMode.SignIn, null) },
+                onRegisterClick = { openAuthScreen(LegacyAuthMode.Register, null) },
                 onLogoutClick = {
                     val token = authToken.orEmpty()
                     authMode = null
@@ -489,7 +564,10 @@ fun PlayMarketScreen() {
                     onLeftClick = {
                         when {
                             selectedApp != null -> selectedApp = null
-                            authMode != null -> authMode = null
+                            authMode != null -> {
+                                pendingAppAfterAuth = null
+                                authMode = null
+                            }
                             showInstalledPackages -> showInstalledPackages = false
                             showWishlist -> showWishlist = false
                             selectedCategory != null -> selectedCategory = null
@@ -510,7 +588,10 @@ fun PlayMarketScreen() {
                     signedInName = signedInName,
                     signedInEmail = signedInEmail,
                     loading = authInProgress,
-                    onCancel = { authMode = null },
+                    onCancel = {
+                        pendingAppAfterAuth = null
+                        authMode = null
+                    },
                     onSubmit = { mode, firstName, lastName, email, password ->
                         authInProgress = true
                         try {
@@ -534,6 +615,7 @@ fun PlayMarketScreen() {
                             wishlistAppIds = session.user.favoriteAppIds.toSet()
                             wishlistError = null
                             authMode = null
+                            restorePendingAppAfterAuth()
                         } finally {
                             authInProgress = false
                         }
@@ -549,6 +631,7 @@ fun PlayMarketScreen() {
                             apiClient = apiClient,
                             storeApps = apps,
                             loadingCatalog = fullCatalogLoading,
+                            installedAppsRefreshKey = installedAppsRefreshKey,
                             onAppClick = onAppClick
                         )
                     } else if (showWishlist) {
@@ -556,6 +639,8 @@ fun PlayMarketScreen() {
                             apps = wishlistApps,
                             loading = wishlistLoading,
                             error = wishlistError,
+                            installedAppsRefreshKey = installedAppsRefreshKey,
+                            activeInstallSession = installSession,
                             onRetry = {
                                 val token = authToken.orEmpty()
                                 if (token.isNotBlank()) {
@@ -569,6 +654,8 @@ fun PlayMarketScreen() {
                             query = searchQuery,
                             apiClient = apiClient,
                             catalogMode = catalogMode,
+                            installedAppsRefreshKey = installedAppsRefreshKey,
+                            activeInstallSession = installSession,
                             onAppClick = onAppClick
                         )
                     } else {
@@ -583,6 +670,8 @@ fun PlayMarketScreen() {
                             apiClient = apiClient,
                             catalogMode = catalogMode,
                             selectedCategory = selectedCategory,
+                            installedAppsRefreshKey = installedAppsRefreshKey,
+                            activeInstallSession = installSession,
                             onCategoryClick = { selectedCategory = it },
                             onAppClick = onAppClick
                         )
@@ -595,9 +684,27 @@ fun PlayMarketScreen() {
                             catalogApps = catalogApps,
                             loadingDetails = loadingDetails,
                             isAuthenticated = authToken.orEmpty().isNotBlank(),
+                            unsupportedOnCurrentDeviceApi = detailsApp.id in unsupportedAppIdsForDeviceApi,
+                            installedAppsRefreshKey = installedAppsRefreshKey,
+                            installSession = installSession?.takeIf { it.packageId == detailsApp.id },
+                            activeInstallSession = installSession,
                             wishlistSelected = detailsApp.id in wishlistAppIds,
                             onWishlistClick = { toggleWishlistForApp(detailsApp) },
-                            onRequireSignIn = { openAuthScreen(LegacyAuthMode.SignIn) },
+                            onMarkUnsupportedForCurrentApi = {
+                                reportUnsupportedAppForCurrentApi(detailsApp.id)
+                            },
+                            onStartInstall = { appToInstall ->
+                                ensureNotificationPermission()
+                                installCoordinator.start(appToInstall)
+                            },
+                            onCancelInstall = { installCoordinator.cancel() },
+                            onDismissInstallError = { installCoordinator.dismissError() },
+                            onRetryInstall = { appToInstall ->
+                                ensureNotificationPermission()
+                                installCoordinator.start(appToInstall)
+                            },
+                            onInstalledStateChanged = { installedAppsRefreshKey += 1 },
+                            onRequireSignIn = { openAuthScreen(LegacyAuthMode.SignIn, detailsApp) },
                             onAppClick = onAppClick
                         )
                     }
@@ -637,6 +744,8 @@ private fun MainTabsPager(
     apiClient: PlayApiClient,
     catalogMode: CatalogMode,
     selectedCategory: String?,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
     onCategoryClick: (String) -> Unit,
     onAppClick: (StoreApp) -> Unit
 ) {
@@ -685,6 +794,8 @@ private fun MainTabsPager(
                 apiClient = apiClient,
                 catalogMode = catalogMode,
                 selectedCategory = selectedCategory,
+                installedAppsRefreshKey = installedAppsRefreshKey,
+                activeInstallSession = activeInstallSession,
                 onCategoryClick = onCategoryClick,
                 onAppClick = onAppClick
             )
@@ -1472,11 +1583,19 @@ private fun MainContent(
     apiClient: PlayApiClient,
     catalogMode: CatalogMode,
     selectedCategory: String?,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
     onCategoryClick: (String) -> Unit,
     onAppClick: (StoreApp) -> Unit
 ) {
     when (tab) {
-        HomeTab.Home -> LegacyHomePage(homePayload = homePayload, fallbackApps = apps, onAppClick = onAppClick)
+        HomeTab.Home -> LegacyHomePage(
+            homePayload = homePayload,
+            fallbackApps = apps,
+            installedAppsRefreshKey = installedAppsRefreshKey,
+            activeInstallSession = activeInstallSession,
+            onAppClick = onAppClick
+        )
         HomeTab.Categories -> {
             if (selectedCategory == null) {
                 CategoriesPage(apps, onCategoryClick)
@@ -1484,15 +1603,67 @@ private fun MainContent(
                 CategoryAppsPage(
                     category = selectedCategory,
                     apps = apps.filter { it.category.equals(selectedCategory, ignoreCase = true) },
+                    installedAppsRefreshKey = installedAppsRefreshKey,
+                    activeInstallSession = activeInstallSession,
                     onAppClick = onAppClick
                 )
             }
         }
-        HomeTab.TopPaid -> PagedChartPage(localizeSectionTitle("Top Paid"), "top_paid", apiClient, catalogMode, onAppClick, style = ChartCardStyle.GrossingBlend, showHeader = false)
-        HomeTab.TopFree -> PagedChartPage(localizeSectionTitle("Top Free"), "top_free", apiClient, catalogMode, onAppClick, style = ChartCardStyle.GrossingBlend, showHeader = false)
-        HomeTab.TopGrossing -> PagedChartPage(localizeSectionTitle("Top Grossing"), "top_grossing", apiClient, catalogMode, onAppClick, style = ChartCardStyle.GrossingBlend, showHeader = false)
-        HomeTab.TopNewPaid -> PagedChartPage(localizeSectionTitle("Top New Paid"), "top_new_paid", apiClient, catalogMode, onAppClick, style = ChartCardStyle.GrossingBlend, showHeader = false)
-        HomeTab.TopNewFree -> PagedChartPage(localizeSectionTitle("Top New Free"), "top_new_free", apiClient, catalogMode, onAppClick, style = ChartCardStyle.GrossingBlend, showHeader = false)
+        HomeTab.TopPaid -> PagedChartPage(
+            title = localizeSectionTitle("Top Paid"),
+            chart = "top_paid",
+            apiClient = apiClient,
+            catalogMode = catalogMode,
+            installedAppsRefreshKey = installedAppsRefreshKey,
+            activeInstallSession = activeInstallSession,
+            onAppClick = onAppClick,
+            style = ChartCardStyle.GrossingBlend,
+            showHeader = false
+        )
+        HomeTab.TopFree -> PagedChartPage(
+            title = localizeSectionTitle("Top Free"),
+            chart = "top_free",
+            apiClient = apiClient,
+            catalogMode = catalogMode,
+            installedAppsRefreshKey = installedAppsRefreshKey,
+            activeInstallSession = activeInstallSession,
+            onAppClick = onAppClick,
+            style = ChartCardStyle.GrossingBlend,
+            showHeader = false
+        )
+        HomeTab.TopGrossing -> PagedChartPage(
+            title = localizeSectionTitle("Top Grossing"),
+            chart = "top_grossing",
+            apiClient = apiClient,
+            catalogMode = catalogMode,
+            installedAppsRefreshKey = installedAppsRefreshKey,
+            activeInstallSession = activeInstallSession,
+            onAppClick = onAppClick,
+            style = ChartCardStyle.GrossingBlend,
+            showHeader = false
+        )
+        HomeTab.TopNewPaid -> PagedChartPage(
+            title = localizeSectionTitle("Top New Paid"),
+            chart = "top_new_paid",
+            apiClient = apiClient,
+            catalogMode = catalogMode,
+            installedAppsRefreshKey = installedAppsRefreshKey,
+            activeInstallSession = activeInstallSession,
+            onAppClick = onAppClick,
+            style = ChartCardStyle.GrossingBlend,
+            showHeader = false
+        )
+        HomeTab.TopNewFree -> PagedChartPage(
+            title = localizeSectionTitle("Top New Free"),
+            chart = "top_new_free",
+            apiClient = apiClient,
+            catalogMode = catalogMode,
+            installedAppsRefreshKey = installedAppsRefreshKey,
+            activeInstallSession = activeInstallSession,
+            onAppClick = onAppClick,
+            style = ChartCardStyle.GrossingBlend,
+            showHeader = false
+        )
     }
 }
 
@@ -1507,11 +1678,12 @@ private fun InstalledPackagesPage(
     apiClient: PlayApiClient,
     storeApps: List<StoreApp>,
     loadingCatalog: Boolean,
+    installedAppsRefreshKey: Int,
     onAppClick: (StoreApp) -> Unit
 ) {
     val context = LocalContext.current
     val packageManager = context.packageManager
-    val packages = remember(storeApps, context) {
+    val packages = remember(storeApps, context, installedAppsRefreshKey) {
         val appsById = storeApps.associateBy { it.id.trim().lowercase(Locale.ROOT) }
         runCatching {
             packageManager.getInstalledPackages(0)
@@ -1696,6 +1868,8 @@ private fun WishlistPage(
     apps: List<StoreApp>,
     loading: Boolean,
     error: String?,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
     onRetry: () -> Unit,
     onAppClick: (StoreApp) -> Unit
 ) {
@@ -1766,7 +1940,11 @@ private fun WishlistPage(
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         items(apps, key = { it.id }) { app ->
-            CompactListItem(app = app) { onAppClick(app) }
+            CompactListItem(
+                app = app,
+                installedAppsRefreshKey = installedAppsRefreshKey,
+                activeInstallSession = activeInstallSession
+            ) { onAppClick(app) }
         }
         if (loading) {
             item(key = "wishlist_loading") {
@@ -1811,7 +1989,13 @@ private fun WishlistPage(
 
 private enum class ChartCardStyle { Classic, GrossingBlend }
 @Composable
-private fun LegacyHomePage(homePayload: HomePayload?, fallbackApps: List<StoreApp>, onAppClick: (StoreApp) -> Unit) {
+private fun LegacyHomePage(
+    homePayload: HomePayload?,
+    fallbackApps: List<StoreApp>,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
+    onAppClick: (StoreApp) -> Unit
+) {
     val heroBanners = homePayload?.heroBanners.orEmpty()
     val sections = homePayload?.sections.orEmpty()
     val firstSection = sections.getOrNull(0)
@@ -1836,9 +2020,9 @@ private fun LegacyHomePage(homePayload: HomePayload?, fallbackApps: List<StoreAp
             }
         }
         item { SectionRow(localizeSectionTitle(firstSection?.title ?: stringResource(R.string.home_our_favorites))) }
-        item { HorizontalAppsRow(first, onAppClick) }
+        item { HorizontalAppsRow(first, installedAppsRefreshKey, activeInstallSession, onAppClick) }
         item { SectionRow(localizeSectionTitle(secondSection?.title ?: stringResource(R.string.home_recommended))) }
-        item { HorizontalAppsRow(second, onAppClick) }
+        item { HorizontalAppsRow(second, installedAppsRefreshKey, activeInstallSession, onAppClick) }
     }
 }
 
@@ -1987,7 +2171,13 @@ private fun CategoriesPage(apps: List<StoreApp>, onCategoryClick: (String) -> Un
 }
 
 @Composable
-private fun CategoryAppsPage(category: String, apps: List<StoreApp>, onAppClick: (StoreApp) -> Unit) {
+private fun CategoryAppsPage(
+    category: String,
+    apps: List<StoreApp>,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
+    onAppClick: (StoreApp) -> Unit
+) {
     val prepared = remember(apps) {
         apps.sortedWith(compareByDescending<StoreApp> { it.installsEstimate }.thenByDescending { it.reviews })
     }
@@ -1997,11 +2187,23 @@ private fun CategoryAppsPage(category: String, apps: List<StoreApp>, onAppClick:
         }
         return
     }
-    TopListPage(title = categoryLabelRu(category), apps = prepared, onAppClick = onAppClick)
+    TopListPage(
+        title = categoryLabelRu(category),
+        apps = prepared,
+        installedAppsRefreshKey = installedAppsRefreshKey,
+        activeInstallSession = activeInstallSession,
+        onAppClick = onAppClick
+    )
 }
 
 @Composable
-private fun TopListPage(title: String, apps: List<StoreApp>, onAppClick: (StoreApp) -> Unit) {
+private fun TopListPage(
+    title: String,
+    apps: List<StoreApp>,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
+    onAppClick: (StoreApp) -> Unit
+) {
     val batchSize = 20
     val skeletonCount = 4
     val scope = rememberCoroutineScope()
@@ -2039,7 +2241,7 @@ private fun TopListPage(title: String, apps: List<StoreApp>, onAppClick: (StoreA
     ) {
         item { SectionRow(title, showMore = false) }
         items(apps.take(visibleCount), key = { it.id }) { app ->
-            CompactListItem(app) { onAppClick(app) }
+            CompactListItem(app, installedAppsRefreshKey, activeInstallSession) { onAppClick(app) }
         }
         if (loadingMore) {
             items(skeletonCount) { CompactListItemSkeleton() }
@@ -2058,6 +2260,8 @@ private fun PagedChartPage(
     chart: String,
     apiClient: PlayApiClient,
     catalogMode: CatalogMode,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
     onAppClick: (StoreApp) -> Unit,
     style: ChartCardStyle = ChartCardStyle.Classic,
     showHeader: Boolean = true
@@ -2126,7 +2330,12 @@ private fun PagedChartPage(
                 item { PlayChartHeader(title) }
             }
             items(items, key = { it.id }) { app ->
-                PlayChartListItem(app = app, style = style) { onAppClick(app) }
+                PlayChartListItem(
+                    app = app,
+                    installedAppsRefreshKey = installedAppsRefreshKey,
+                    activeInstallSession = activeInstallSession,
+                    style = style
+                ) { onAppClick(app) }
             }
             if (loadingMore) {
                 items(4) { PlayChartListItemSkeleton() }
@@ -2172,13 +2381,20 @@ private fun PlayChartHeader(title: String) {
 }
 
 @Composable
-private fun PlayChartListItem(app: StoreApp, style: ChartCardStyle = ChartCardStyle.Classic, onClick: () -> Unit) {
+private fun PlayChartListItem(
+    app: StoreApp,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
+    style: ChartCardStyle = ChartCardStyle.Classic,
+    onClick: () -> Unit
+) {
     val chartPriceColor = Color(0xFF86A81F)
     val chartTitleColor = Color(0xFF2F2F2F)
     val chartSubtitleColor = Color(0xFF8B8B8B)
     val chartRatingColor = Color(0xFF7D7D7D)
     val chartCountColor = Color(0xFFA0A0A0)
-    val statusLabel = appCardStatusLabel(app)
+    val isInstalledOnDevice = rememberAppInstalledState(app.id, installedAppsRefreshKey)
+    val statusUi = appCardStatusUi(app, isInstalledOnDevice, activeInstallSession)
     val interactionSource = remember { MutableInteractionSource() }
     val hovered by interactionSource.collectIsHoveredAsState()
     val pressed by interactionSource.collectIsPressedAsState()
@@ -2248,9 +2464,9 @@ private fun PlayChartListItem(app: StoreApp, style: ChartCardStyle = ChartCardSt
                     }
                     Spacer(Modifier.weight(1f))
                     Text(
-                        text = statusLabel,
+                        text = statusUi.label,
                         color = chartPriceColor,
-                        fontSize = if (isAppInstalledOnDevice(LocalContext.current, app.id)) 10.sp else 12.sp,
+                        fontSize = if (statusUi.compact) 10.sp else 12.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -2312,13 +2528,13 @@ private fun PlayChartListItem(app: StoreApp, style: ChartCardStyle = ChartCardSt
                 }
             }
         }
-        Text(
-            text = statusLabel,
-            color = chartPriceColor,
-            fontSize = if (isAppInstalledOnDevice(LocalContext.current, app.id)) 10.sp else 12.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
+            Text(
+                text = statusUi.label,
+                color = chartPriceColor,
+                fontSize = if (statusUi.compact) 10.sp else 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
     }
     HorizontalDivider(color = Color(0x14000000), modifier = Modifier.padding(start = 88.dp))
 }
@@ -2359,6 +2575,8 @@ private fun SearchResultsPage(
     query: String,
     apiClient: PlayApiClient,
     catalogMode: CatalogMode,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
     onAppClick: (StoreApp) -> Unit
 ) {
     val normalized = query.trim()
@@ -2416,7 +2634,12 @@ private fun SearchResultsPage(
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             items(results, key = { it.id }) { app ->
-                PlayChartListItem(app = app, style = ChartCardStyle.GrossingBlend) { onAppClick(app) }
+                PlayChartListItem(
+                    app = app,
+                    installedAppsRefreshKey = installedAppsRefreshKey,
+                    activeInstallSession = activeInstallSession,
+                    style = ChartCardStyle.GrossingBlend
+                ) { onAppClick(app) }
             }
         }
     }
@@ -2428,17 +2651,26 @@ private fun AppDetailsPage(
     catalogApps: List<StoreApp>,
     loadingDetails: Boolean,
     isAuthenticated: Boolean,
+    unsupportedOnCurrentDeviceApi: Boolean,
+    installedAppsRefreshKey: Int,
+    installSession: InstallSessionState?,
+    activeInstallSession: InstallSessionState?,
     wishlistSelected: Boolean,
     onWishlistClick: () -> Unit,
+    onMarkUnsupportedForCurrentApi: () -> Unit,
+    onStartInstall: (StoreApp) -> Unit,
+    onCancelInstall: () -> Unit,
+    onDismissInstallError: () -> Unit,
+    onRetryInstall: (StoreApp) -> Unit,
+    onInstalledStateChanged: () -> Unit,
     onRequireSignIn: () -> Unit,
     onAppClick: (StoreApp) -> Unit
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val apiClient = remember { PlayApiClient(BuildConfig.PLAY_API_BASE_URL) }
-    val apkInstallDispatcher = remember(context) { createApkInstallDispatcher(context) }
     val packageManager = context.packageManager
     val uriHandler = LocalUriHandler.current
+    val unsupportedOnDeviceMessage = stringResource(R.string.availability_restriction_hardware_app)
+    val abiIncompatibleMessage = stringResource(R.string.install_failed_cpu_abi_incompatible)
     val screenshotImages = remember(app.id, app.screenshots, app.iconUrl) {
         app.screenshots
             .map(String::trim)
@@ -2482,350 +2714,64 @@ private fun AppDetailsPage(
     val whatsNewText = app.whatsNew.joinToString("\n").ifBlank { "" }
     val similarApps = remember(app.similarAppIds, catalogApps) { app.similarAppIds.mapNotNull { id -> catalogApps.firstOrNull { it.id == id } } }
     val moreFromDeveloper = remember(app.moreFromDeveloperIds, catalogApps) { app.moreFromDeveloperIds.mapNotNull { id -> catalogApps.firstOrNull { it.id == id } } }
-    var installStateRefreshKey by rememberSaveable(app.id) { mutableIntStateOf(0) }
-    val launchIntent = remember(packageManager, app.id, installStateRefreshKey) {
+    val launchIntent = remember(packageManager, app.id, installedAppsRefreshKey) {
         packageManager.getLaunchIntentForPackage(app.id)
     }
-    val isInstalledOnDevice = remember(context, app.id, launchIntent, installStateRefreshKey) {
+    val isInstalledOnDevice = remember(context, app.id, launchIntent, installedAppsRefreshKey) {
         isAppInstalledOnDevice(context, app.id) || launchIntent != null
     }
+    val isUnsupportedForCurrentDevice = unsupportedOnCurrentDeviceApi && !isInstalledOnDevice
     val uninstallLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) {
-        installStateRefreshKey += 1
+        onInstalledStateChanged()
     }
     var showInstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var showInstallAuthDialog by rememberSaveable(app.id) { mutableStateOf(false) }
-    var showUninstallDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var fullscreenShotIndex by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
-    var installProgress by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
-    var installStage by rememberSaveable(app.id) { mutableStateOf(INSTALL_STAGE_IDLE) }
-    var installDownloadedBytes by rememberSaveable(app.id) { mutableStateOf(0L) }
-    var installTotalBytes by rememberSaveable(app.id) { mutableStateOf<Long?>(null) }
-    var installErrorMessage by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
-    var pendingApkCachePath by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
-    var pendingInstallUri by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
-    var pendingLegacyInstallPath by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
-    var installFlowJob by remember(app.id) { mutableStateOf<Job?>(null) }
-    var installMonitorJob by remember(app.id) { mutableStateOf<Job?>(null) }
-
-    val clearPendingApk = {
-        pendingApkCachePath?.let { cachedPath ->
-            runCatching { File(cachedPath).delete() }
-        }
-        pendingLegacyInstallPath?.let { cachedPath ->
-            runCatching { File(cachedPath).delete() }
-        }
-        pendingApkCachePath = null
-        pendingInstallUri = null
-        pendingLegacyInstallPath = null
-        installDownloadedBytes = 0L
-        installTotalBytes = null
-    }
-
-    val resetInstallUi: (String?) -> Unit = { errorMessage ->
-        installFlowJob?.cancel()
-        installFlowJob = null
-        installMonitorJob?.cancel()
-        installMonitorJob = null
-        installProgress = null
-        installStage = INSTALL_STAGE_IDLE
-        installErrorMessage = errorMessage
-        clearPendingApk()
-    }
-
-    val finishInstallSuccess = {
-        installFlowJob?.cancel()
-        installFlowJob = null
-        installMonitorJob = null
-        installStateRefreshKey += 1
-        installProgress = null
-        installStage = INSTALL_STAGE_IDLE
-        installErrorMessage = null
-        clearPendingApk()
-    }
-
-    val startInstallMonitor = {
-        installMonitorJob?.cancel()
-        installMonitorJob = scope.launch {
-            val startedAt = System.currentTimeMillis()
-            while (true) {
-                if (isAppInstalledOnDevice(context, app.id)) {
-                    finishInstallSuccess()
-                    return@launch
-                }
-                if (System.currentTimeMillis() - startedAt >= INSTALL_MONITOR_TIMEOUT_MS) {
-                    resetInstallUi(
-                        tr(
-                            "Установка не завершилась вовремя. Попробуйте снова.",
-                            "Installation did not complete in time. Please try again."
-                        )
-                    )
-                    return@launch
-                }
-                delay(INSTALL_POLL_INTERVAL_MS)
-            }
-        }
-    }
-
-    val installApkLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (isAppInstalledOnDevice(context, app.id)) {
-            finishInstallSuccess()
-            return@rememberLauncherForActivityResult
-        }
-
-        if (result.resultCode == Activity.RESULT_OK) {
-            installStage = INSTALL_STAGE_INSTALLING
-            installProgress = -1
-            startInstallMonitor()
-            return@rememberLauncherForActivityResult
-        }
-
-        val installResult = result.data?.getIntExtra(EXTRA_INSTALL_RESULT, Int.MIN_VALUE)
-        val isLegacyAmbiguousResult =
-            Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1 &&
-                result.resultCode == Activity.RESULT_CANCELED &&
-                installResult == Int.MIN_VALUE
-        if (isLegacyAmbiguousResult) {
-            installStage = INSTALL_STAGE_INSTALLING
-            installProgress = -1
-            startInstallMonitor()
-            return@rememberLauncherForActivityResult
-        }
-
-        val debugCode = if (installResult == null || installResult == Int.MIN_VALUE) {
-            "result=${result.resultCode}"
-        } else {
-            "result=${result.resultCode}, install=$installResult"
-        }
-        resetInstallUi(
-            tr(
-                "Установка не завершена ($debugCode). Проверьте подтверждение в системном установщике.",
-                "Installation not completed ($debugCode). Confirm installation in the system installer."
-            )
-        )
-    }
-
-    val unknownSourcesLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            !context.packageManager.canRequestPackageInstalls()
-        ) {
-            resetInstallUi(
-                tr(
-                    "Разрешите установку из неизвестных источников для этого приложения.",
-                    "Allow unknown app installs for this app."
-                )
-            )
-            return@rememberLauncherForActivityResult
-        }
-
-        val uriString = pendingInstallUri
-        if (uriString.isNullOrBlank()) {
-            resetInstallUi(
-                tr(
-                    "Не найден файл APK для установки.",
-                    "APK file is missing for installation."
-                )
-            )
-            return@rememberLauncherForActivityResult
-        }
-
-        installStage = INSTALL_STAGE_INSTALLING
-        installProgress = -1
-        startInstallMonitor()
-        apkInstallDispatcher.launch(
-            apkUri = Uri.parse(uriString),
-            legacyFilePath = pendingLegacyInstallPath,
-            launcher = installApkLauncher,
-            onFailure = {
-                resetInstallUi(
-                    tr(
-                        "Не удалось запустить установщик APK.",
-                        "Failed to start APK installer."
-                    )
-                )
-            }
-        )
-    }
+    var localInstallErrorMessage by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
+    val installProgress = installSession?.progress
+    val installStage = installSession?.stage ?: INSTALL_STAGE_IDLE
+    val installDownloadedBytes = installSession?.downloadedBytes ?: 0L
+    val installTotalBytes = installSession?.totalBytes
+    val installErrorMessage = installSession?.errorMessage ?: localInstallErrorMessage
 
     val startInstallFlow = startInstallFlow@{
+        if (isUnsupportedForCurrentDevice) {
+            localInstallErrorMessage = abiIncompatibleMessage
+            onMarkUnsupportedForCurrentApi()
+            return@startInstallFlow
+        }
         if (!isAuthenticated) {
-            installErrorMessage = null
+            localInstallErrorMessage = null
             showInstallAuthDialog = true
             return@startInstallFlow
         }
         val requiredApi = parseRequiresAndroidApiLevel(app.requiresAndroid)
         if (requiredApi != null && Build.VERSION.SDK_INT < requiredApi) {
             val requiredLabel = app.requiresAndroid.ifBlank { "API $requiredApi" }
-            resetInstallUi(
-                tr(
-                    "Приложение требует Android $requiredLabel (API $requiredApi). На устройстве Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}).",
-                    "This app requires Android $requiredLabel (API $requiredApi). Device is Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})."
-                )
+            localInstallErrorMessage = tr(
+                "Приложение требует Android $requiredLabel (API $requiredApi). На устройстве Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}).",
+                "This app requires Android $requiredLabel (API $requiredApi). Device is Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})."
             )
             return@startInstallFlow
         }
-        installFlowJob?.cancel()
-        installFlowJob = null
-        installMonitorJob?.cancel()
-        installMonitorJob = null
-        clearPendingApk()
-        installErrorMessage = null
-        installDownloadedBytes = 0L
-        installTotalBytes = null
-        installStage = INSTALL_STAGE_PREPARING
-        installProgress = -1
-
-        installFlowJob = scope.launch {
-            delay(INSTALL_PREPARATION_DURATION_MS)
-            installStage = INSTALL_STAGE_DOWNLOADING
-            installProgress = 0
-
-            val apkCacheDir = File(context.cacheDir, "apk-installer")
-            val apkCacheFile = File(apkCacheDir, "${app.id}.apk")
-
-            val downloadedFile = runCatching {
-                withContext(Dispatchers.IO) {
-                    if (apkCacheFile.exists()) {
-                        apkCacheFile.delete()
-                    }
-                    apiClient.downloadApkToFile(app.id, apkCacheFile) { downloadedBytes, totalBytes ->
-                        scope.launch {
-                            installStage = INSTALL_STAGE_DOWNLOADING
-                            installDownloadedBytes = downloadedBytes
-                            installTotalBytes = totalBytes.takeIf { it > 0L }
-                            installProgress = if (totalBytes > 0L) {
-                                ((downloadedBytes * 100L) / totalBytes)
-                                    .toInt()
-                                    .coerceIn(0, 100)
-                            } else {
-                                0
-                            }
-                        }
-                    }
-                    apkCacheFile
-                }
-            }.onFailure { failure ->
-                val errorSuffix = failure.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""
-                resetInstallUi(
-                    tr(
-                        "Не удалось скачать APK из локального API$errorSuffix",
-                        "Failed to download APK from local API$errorSuffix"
-                    )
-                )
-                runCatching { apkCacheFile.delete() }
-            }.getOrNull() ?: return@launch
-
-            val apkUri = runCatching {
-                FileProvider.getUriForFile(
-                    context,
-                    "${context.packageName}.fileprovider",
-                    downloadedFile
-                )
-            }.onFailure {
-                resetInstallUi(
-                    tr(
-                        "Не удалось подготовить APK для установки.",
-                        "Failed to prepare APK for installation."
-                    )
-                )
-                runCatching { downloadedFile.delete() }
-            }.getOrNull() ?: return@launch
-
-            val legacyInstallPath = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) {
-                runCatching {
-                    val externalBaseDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                        ?: context.getExternalFilesDir(null)
-                        ?: context.cacheDir
-                    val legacyDir = File(externalBaseDir, "apk-installer")
-                    if (!legacyDir.exists()) {
-                        legacyDir.mkdirs()
-                    }
-                    val legacyFile = File(legacyDir, "${app.id}.apk")
-                    if (legacyFile.exists()) {
-                        legacyFile.delete()
-                    }
-                    downloadedFile.copyTo(legacyFile, overwrite = true)
-                    legacyFile.absolutePath
-                }.getOrNull()
-            } else {
-                null
+        localInstallErrorMessage = null
+        onStartInstall(app)
+    }
+    val launchUninstallFlow = {
+        val uninstallIntent = Intent(Intent.ACTION_DELETE).apply {
+            data = Uri.parse("package:${app.id}")
+            putExtra(Intent.EXTRA_RETURN_RESULT, true)
+        }
+        runCatching {
+            uninstallLauncher.launch(uninstallIntent)
+        }.onFailure {
+            val fallbackIntent = Intent(Intent.ACTION_DELETE).apply {
+                data = Uri.parse("package:${app.id}")
             }
-
-            pendingApkCachePath = downloadedFile.absolutePath
-            pendingInstallUri = apkUri.toString()
-            pendingLegacyInstallPath = legacyInstallPath
-            val finalSize = downloadedFile.length().coerceAtLeast(0L)
-            installDownloadedBytes = finalSize
-            installTotalBytes = installTotalBytes ?: finalSize
-            installProgress = 100
-            installFlowJob = null
-            val parsedPackageName = runCatching {
-                packageManager.getPackageArchiveInfo(downloadedFile.absolutePath, 0)?.packageName
-            }.getOrNull()
-            if (parsedPackageName.isNullOrBlank()) {
-                resetInstallUi(
-                    tr(
-                        "Скачанный APK не прошёл проверку PackageManager (INVALID_APK). Попробуйте ещё раз.",
-                        "Downloaded APK failed PackageManager verification (INVALID_APK). Please retry."
-                    )
-                )
-                runCatching { downloadedFile.delete() }
-                return@launch
-            }
-            if (!parsedPackageName.equals(app.id, ignoreCase = true)) {
-                resetInstallUi(
-                    tr(
-                        "Пакет APK не совпадает: ожидался ${app.id}, получен $parsedPackageName.",
-                        "APK package mismatch: expected ${app.id}, got $parsedPackageName."
-                    )
-                )
-                runCatching { downloadedFile.delete() }
-                return@launch
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                !context.packageManager.canRequestPackageInstalls()
-            ) {
-                installStage = INSTALL_STAGE_PREPARING
-                installProgress = -1
-                val settingsIntent = Intent(
-                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:${context.packageName}")
-                )
-                runCatching {
-                    unknownSourcesLauncher.launch(settingsIntent)
-                }.onFailure {
-                    resetInstallUi(
-                        tr(
-                            "Не удалось открыть настройки разрешения на установку.",
-                            "Failed to open install permission settings."
-                        )
-                    )
-                }
-                return@launch
-            }
-
-            installStage = INSTALL_STAGE_INSTALLING
-            installProgress = -1
-            startInstallMonitor()
-            apkInstallDispatcher.launch(
-                apkUri = apkUri,
-                legacyFilePath = pendingLegacyInstallPath,
-                launcher = installApkLauncher,
-                onFailure = {
-                    resetInstallUi(
-                        tr(
-                            "Не удалось запустить установщик APK.",
-                            "Failed to start APK installer."
-                        )
-                    )
-                }
-            )
+            runCatching { context.startActivity(fallbackIntent) }
+            onInstalledStateChanged()
         }
     }
 
@@ -2856,28 +2802,19 @@ private fun AppDetailsPage(
         LegacyInstallErrorDialog(
             appName = app.name,
             message = installErrorMessage.orEmpty(),
-            onDismiss = { installErrorMessage = null },
-            onRetry = { startInstallFlow() }
-        )
-    }
-    if (showUninstallDialog) {
-        LegacyUninstallConfirmDialog(
-            appName = app.name,
-            onDismiss = { showUninstallDialog = false },
-            onUninstall = {
-                showUninstallDialog = false
-                val uninstallIntent = Intent(Intent.ACTION_DELETE).apply {
-                    data = Uri.parse("package:${app.id}")
-                    putExtra(Intent.EXTRA_RETURN_RESULT, true)
+            onDismiss = {
+                if (installSession?.errorMessage != null) {
+                    onDismissInstallError()
+                } else {
+                    localInstallErrorMessage = null
                 }
-                runCatching {
-                    uninstallLauncher.launch(uninstallIntent)
-                }.onFailure {
-                    val fallbackIntent = Intent(Intent.ACTION_DELETE).apply {
-                        data = Uri.parse("package:${app.id}")
-                    }
-                    runCatching { context.startActivity(fallbackIntent) }
-                    installStateRefreshKey += 1
+            },
+            showRetry = !isUnsupportedForCurrentDevice,
+            onRetry = {
+                if (installSession?.errorMessage != null) {
+                    onRetryInstall(app)
+                } else {
+                    startInstallFlow()
                 }
             }
         )
@@ -2949,7 +2886,7 @@ private fun AppDetailsPage(
                                 stage = installStage,
                                 downloadedBytes = installDownloadedBytes,
                                 totalBytes = installTotalBytes,
-                                onCancel = { resetInstallUi(null) },
+                                onCancel = onCancelInstall,
                                 modifier = Modifier.fillMaxWidth(),
                                 showCancel = false
                             )
@@ -2969,36 +2906,55 @@ private fun AppDetailsPage(
                             val detailsActionButtonModifier = Modifier
                                 .width(122.dp)
                                 .height(40.dp)
+                            val primaryActionButtonModifier = if (isUnsupportedForCurrentDevice) {
+                                Modifier
+                                    .width(162.dp)
+                                    .heightIn(min = 44.dp)
+                            } else {
+                                detailsActionButtonModifier
+                            }
                             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Box(
-                                    detailsActionButtonModifier
-                                        .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
-                                        .clickable {
-                                            if (isInstalledOnDevice && launchIntent != null) {
-                                                context.startActivity(launchIntent)
-                                            } else if (!isInstalledOnDevice) {
-                                                if (isAuthenticated) {
-                                                    showInstallDialog = true
-                                                } else {
-                                                    installErrorMessage = null
-                                                    showInstallAuthDialog = true
+                                    primaryActionButtonModifier
+                                        .background(
+                                            if (isUnsupportedForCurrentDevice) Color(0xFFD8D8D8) else Color(0xFFAFCA34),
+                                            RoundedCornerShape(2.dp)
+                                        )
+                                        .then(
+                                            if (isUnsupportedForCurrentDevice) {
+                                                Modifier
+                                            } else {
+                                                Modifier.clickable {
+                                                    if (isInstalledOnDevice && launchIntent != null) {
+                                                        context.startActivity(launchIntent)
+                                                    } else if (!isInstalledOnDevice) {
+                                                        if (isAuthenticated) {
+                                                            showInstallDialog = true
+                                                        } else {
+                                                            localInstallErrorMessage = null
+                                                            showInstallAuthDialog = true
+                                                        }
+                                                    }
                                                 }
                                             }
-                                        }
+                                        )
                                         .padding(horizontal = 10.dp, vertical = 7.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
                                         text = when {
+                                            isUnsupportedForCurrentDevice -> unsupportedOnDeviceMessage
                                             isInstalledOnDevice -> stringResource(R.string.open).uppercase(Locale.getDefault())
                                             app.isFree -> stringResource(R.string.install).uppercase(Locale.getDefault())
                                             else -> priceLabelForUi(app)
                                         },
-                                        color = Color.White,
-                                        fontSize = 12.sp,
+                                        color = if (isUnsupportedForCurrentDevice) Color(0xFF636363) else Color.White,
+                                        fontSize = if (isUnsupportedForCurrentDevice) 10.sp else 12.sp,
                                         fontWeight = FontWeight.Bold,
                                         modifier = Modifier.fillMaxWidth(),
-                                        textAlign = TextAlign.Center
+                                        textAlign = TextAlign.Center,
+                                        maxLines = if (isUnsupportedForCurrentDevice) 3 else 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                                 if (isInstalledOnDevice) {
@@ -3006,7 +2962,7 @@ private fun AppDetailsPage(
                                         modifier = detailsActionButtonModifier
                                             .background(Color.White)
                                             .border(1.dp, Color(0x14000000))
-                                            .clickable { showUninstallDialog = true }
+                                            .clickable { launchUninstallFlow() }
                                             .padding(horizontal = 10.dp, vertical = 7.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
@@ -3026,9 +2982,7 @@ private fun AppDetailsPage(
                                 modifier = Modifier
                                     .background(Color.White)
                                     .border(1.dp, Color(0x14000000))
-                                    .clickable {
-                                        resetInstallUi(null)
-                                    }
+                                    .clickable { onCancelInstall() }
                                     .padding(horizontal = 8.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -3182,13 +3136,13 @@ private fun AppDetailsPage(
         if (similarApps.isNotEmpty()) {
             item {
                 DetailsContentBlock(title = stringResource(R.string.details_similar_apps_title)) {
-                    HorizontalAppsRow(similarApps, onAppClick)
+                    HorizontalAppsRow(similarApps, installedAppsRefreshKey, activeInstallSession, onAppClick)
                 }
             }
         }
         if (moreFromDeveloper.isNotEmpty()) {
             item { DetailsSectionHeader("Ещё от разработчика", null) }
-            item { HorizontalAppsRow(moreFromDeveloper, onAppClick) }
+            item { HorizontalAppsRow(moreFromDeveloper, installedAppsRefreshKey, activeInstallSession, onAppClick) }
         }
     }
 }
@@ -3589,6 +3543,7 @@ private fun LegacyInstallErrorDialog(
     appName: String,
     message: String,
     onDismiss: () -> Unit,
+    showRetry: Boolean = true,
     onRetry: () -> Unit
 ) {
     Dialog(
@@ -3625,7 +3580,7 @@ private fun LegacyInstallErrorDialog(
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Text(
-                    tr("ОТМЕНА", "CANCEL"),
+                    if (showRetry) tr("ОТМЕНА", "CANCEL") else tr("ОК", "OK"),
                     color = Color(0xFF7F7F7F),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -3633,86 +3588,21 @@ private fun LegacyInstallErrorDialog(
                         .clickable { onDismiss() }
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 )
-                Spacer(Modifier.width(6.dp))
-                Box(
-                    Modifier
-                        .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
-                        .clickable { onRetry() }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        tr("ПОВТОРИТЬ", "RETRY"),
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LegacyUninstallConfirmDialog(
-    appName: String,
-    onDismiss: () -> Unit,
-    onUninstall: () -> Unit
-) {
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color.White)
-                .border(1.dp, Color(0x33000000))
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                text = appName,
-                color = Color(0xFF1F1F1F),
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = stringResource(R.string.uninstall),
-                color = Color(0xFF333333),
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Normal
-            )
-            Text(
-                text = stringResource(R.string.uninstall_app_msg),
-                color = Color(0xFF4D4D4D),
-                fontSize = 14.sp,
-                lineHeight = 18.sp
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                Text(
-                    text = stringResource(R.string.cancel).uppercase(Locale.getDefault()),
-                    color = Color(0xFF7F7F7F),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .clickable { onDismiss() }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                )
-                Spacer(Modifier.width(6.dp))
-                Box(
-                    Modifier
-                        .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
-                        .clickable { onUninstall() }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = stringResource(R.string.uninstall).uppercase(Locale.getDefault()),
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                if (showRetry) {
+                    Spacer(Modifier.width(6.dp))
+                    Box(
+                        Modifier
+                            .background(Color(0xFFAFCA34), RoundedCornerShape(2.dp))
+                            .clickable { onRetry() }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            tr("ПОВТОРИТЬ", "RETRY"),
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }
@@ -4028,18 +3918,29 @@ private fun SectionRow(title: String, showMore: Boolean = true) {
 }
 
 @Composable
-private fun HorizontalAppsRow(apps: List<StoreApp>, onAppClick: (StoreApp) -> Unit) {
+private fun HorizontalAppsRow(
+    apps: List<StoreApp>,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
+    onAppClick: (StoreApp) -> Unit
+) {
     LazyRow(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         contentPadding = PaddingValues(horizontal = 8.dp)
     ) {
-        items(apps) { app -> LegacyAppTile(app) { onAppClick(app) } }
+        items(apps) { app -> LegacyAppTile(app, installedAppsRefreshKey, activeInstallSession) { onAppClick(app) } }
     }
 }
 
 @Composable
-private fun LegacyAppTile(app: StoreApp, onClick: () -> Unit) {
-    val statusLabel = appCardStatusLabel(app)
+private fun LegacyAppTile(
+    app: StoreApp,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
+    onClick: () -> Unit
+) {
+    val isInstalledOnDevice = rememberAppInstalledState(app.id, installedAppsRefreshKey)
+    val statusUi = appCardStatusUi(app, isInstalledOnDevice, activeInstallSession)
     val interactionSource = remember { MutableInteractionSource() }
     val hovered by interactionSource.collectIsHoveredAsState()
     val pressed by interactionSource.collectIsPressedAsState()
@@ -4093,9 +3994,9 @@ private fun LegacyAppTile(app: StoreApp, onClick: () -> Unit) {
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
-                    statusLabel,
+                    statusUi.label,
                     color = Color(0xFF96B62A),
-                    fontSize = if (isAppInstalledOnDevice(LocalContext.current, app.id)) 9.sp else 11.sp,
+                    fontSize = if (statusUi.compact) 9.sp else 11.sp,
                     textAlign = TextAlign.End,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -4106,8 +4007,14 @@ private fun LegacyAppTile(app: StoreApp, onClick: () -> Unit) {
 }
 
 @Composable
-private fun CompactListItem(app: StoreApp, onClick: () -> Unit) {
-    val statusLabel = appCardStatusLabel(app)
+private fun CompactListItem(
+    app: StoreApp,
+    installedAppsRefreshKey: Int,
+    activeInstallSession: InstallSessionState?,
+    onClick: () -> Unit
+) {
+    val isInstalledOnDevice = rememberAppInstalledState(app.id, installedAppsRefreshKey)
+    val statusUi = appCardStatusUi(app, isInstalledOnDevice, activeInstallSession)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -4132,9 +4039,9 @@ private fun CompactListItem(app: StoreApp, onClick: () -> Unit) {
             LegacyStarText(rating = ratingForCard(app))
         }
         Text(
-            statusLabel,
+            statusUi.label,
             color = Color(0xFF96B62A),
-            fontSize = if (isAppInstalledOnDevice(LocalContext.current, app.id)) 10.sp else 12.sp,
+            fontSize = if (statusUi.compact) 10.sp else 12.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -4240,15 +4147,48 @@ private fun priceLabelForUi(app: StoreApp): String {
 }
 
 @Composable
-private fun appCardStatusLabel(app: StoreApp): String {
+private fun rememberAppInstalledState(packageName: String, installedAppsRefreshKey: Int): Boolean {
     val context = LocalContext.current
-    val isInstalledOnDevice = remember(context, app.id) {
-        isAppInstalledOnDevice(context, app.id)
+    return remember(context, packageName, installedAppsRefreshKey) {
+        isAppInstalledOnDevice(context, packageName)
     }
-    return if (isInstalledOnDevice) {
-        stringResource(R.string.installed_list_state).uppercase(Locale.getDefault())
-    } else {
-        priceLabelForUi(app)
+}
+
+private data class AppCardStatusUi(
+    val label: String,
+    val compact: Boolean
+)
+
+private fun appCardStatusUi(
+    app: StoreApp,
+    isInstalledOnDevice: Boolean,
+    activeInstallSession: InstallSessionState?
+): AppCardStatusUi {
+    val activeStage = activeInstallSession
+        ?.takeIf { it.packageId == app.id && it.errorMessage.isNullOrBlank() }
+        ?.stage
+
+    return when (activeStage) {
+        INSTALL_STAGE_PREPARING,
+        INSTALL_STAGE_DOWNLOADING -> AppCardStatusUi(
+            label = tr("ЗАГРУЗКА…", "DOWNLOADING…"),
+            compact = true
+        )
+        INSTALL_STAGE_INSTALLING -> AppCardStatusUi(
+            label = tr("УСТАНОВКА…", "INSTALLING…"),
+            compact = true
+        )
+        else -> if (isInstalledOnDevice) {
+            AppCardStatusUi(
+                label = tr("УСТАНОВЛЕНО", "INSTALLED"),
+                compact = true
+            )
+        } else {
+            AppCardStatusUi(
+                label = priceLabelForUi(app),
+                compact = false
+            )
+        }
     }
 }
 

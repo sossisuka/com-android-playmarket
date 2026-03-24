@@ -485,6 +485,149 @@ function normalizeArchiveUrl(value) {
   return raw;
 }
 
+function normalizeArchiveMediaUrl(value) {
+  let raw = normalizeArchiveUrl(decodeAttribute(value));
+  if (!raw) return "";
+  if (raw.startsWith("//")) raw = `https:${raw}`;
+
+  const waybackMatch = raw.match(
+    /^https?:\/\/web\.archive\.org\/web\/\d{14}(?:[a-z_]+)?\/(.+)$/i,
+  );
+  if (waybackMatch?.[1]) {
+    raw = waybackMatch[1];
+  }
+
+  if (raw.startsWith("//")) raw = `https:${raw}`;
+  if (/^http:\/\//i.test(raw)) {
+    raw = `https://${raw.slice("http://".length)}`;
+  }
+
+  return raw;
+}
+
+function isDirectMediaUrl(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return false;
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return false;
+  }
+
+  const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+  return (
+    host.endsWith(".ggpht.com") ||
+    host === "ggpht.com" ||
+    host.endsWith("googleusercontent.com") ||
+    host.endsWith("ytimg.com")
+  );
+}
+
+function collectAllMatches(value, pattern, groupIndex = 1) {
+  const matches = [];
+  for (const match of String(value ?? "").matchAll(pattern)) {
+    const candidate = decodeAttribute(match[groupIndex] ?? "");
+    if (candidate) matches.push(candidate);
+  }
+  return matches;
+}
+
+function normalizeYoutubeUrl(rawUrl) {
+  const value = String(rawUrl ?? "").trim();
+  if (!value) return undefined;
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+
+  const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+  if (host === "youtu.be") {
+    const videoId = parsed.pathname.replace(/^\/+/, "").split("/")[0];
+    return videoId ? `https://www.youtube.com/watch?v=${videoId}` : undefined;
+  }
+
+  if (!host.endsWith("youtube.com")) return undefined;
+
+  const videoId = parsed.searchParams.get("v");
+  if (videoId) return `https://www.youtube.com/watch?v=${videoId}`;
+
+  const pathParts = parsed.pathname.split("/").filter(Boolean);
+  if (pathParts[0] === "embed" && pathParts[1]) {
+    return `https://www.youtube.com/watch?v=${pathParts[1]}`;
+  }
+
+  return value;
+}
+
+function pickFirstMediaUrl(candidates) {
+  for (const candidate of candidates) {
+    const normalized = normalizeArchiveMediaUrl(candidate);
+    if (isDirectMediaUrl(normalized)) return normalized;
+  }
+  return "";
+}
+
+function extractDetailMedia(html) {
+  const screenshots = [];
+  const screenshotCandidates = [
+    ...collectAllMatches(
+      html,
+      /<img[^>]*class="[^"]*\bfull-screenshot\b[^"]*"[^>]*src="([^"]+)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<img[^>]*class="[^"]*\bscreenshot\b[^"]*"[^>]*src="([^"]+)"/gi,
+    ),
+  ];
+
+  const screenshotSeen = new Set();
+  for (const candidate of screenshotCandidates) {
+    const normalized = normalizeArchiveMediaUrl(candidate);
+    if (!isDirectMediaUrl(normalized) || screenshotSeen.has(normalized)) {
+      continue;
+    }
+    screenshotSeen.add(normalized);
+    screenshots.push(normalized);
+  }
+
+  const trailerImage = pickFirstMediaUrl([
+    ...collectAllMatches(
+      html,
+      /<img[^>]*class="[^"]*\bvideo-image\b[^"]*"[^>]*src="([^"]+)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<img[^>]*class="[^"]*\bpreview-image\b[^"]*"[^>]*src="([^"]+)"/gi,
+    ),
+  ]);
+
+  let trailerUrl;
+  for (const candidate of [
+    ...collectAllMatches(html, /data-video-url="([^"]+)"/gi),
+    ...collectAllMatches(
+      html,
+      /<a[^>]*href="([^"]*(?:youtube\.com|youtu\.be)[^"]*)"/gi,
+    ),
+  ]) {
+    const normalized = normalizeYoutubeUrl(decodeAttribute(candidate));
+    if (normalized) {
+      trailerUrl = normalized;
+      break;
+    }
+  }
+
+  return {
+    trailerImage,
+    trailerUrl,
+    screenshots,
+  };
+}
+
 function extractWaybackTimestamp(value) {
   return String(value ?? "").match(/\/web\/(\d{14})(?:[a-z_]+)?\//i)?.[1] ?? "";
 }
@@ -745,6 +888,7 @@ function extractCategory(html) {
 
 function extractDetailFields(html, detailTimestamp) {
   const metadata = extractMetadataMap(html);
+  const media = extractDetailMedia(html);
   const name = cleanText(
     firstMatch(html, [
       /<div class="document-title"[^>]*itemprop="name"[^>]*>\s*<div>([\s\S]*?)<\/div>/i,
@@ -759,7 +903,7 @@ function extractDetailFields(html, detailTimestamp) {
       /itemprop="author"[\s\S]*?<a[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/a>/i,
     ]),
   );
-  const icon = normalizeArchiveUrl(
+  const icon = normalizeArchiveMediaUrl(
     decodeAttribute(
       firstMatch(html, [
         /<img class="cover-image"[^>]*src="([^"]+)"/i,
@@ -803,6 +947,9 @@ function extractDetailFields(html, detailTimestamp) {
     publisher,
     icon,
     image: icon,
+    trailerImage: media.trailerImage || undefined,
+    trailerUrl: media.trailerUrl,
+    screenshots: media.screenshots,
     category: extractCategory(html),
     price: normalizePrice(priceMeta, priceText),
     updatedAt,
@@ -838,6 +985,9 @@ function buildAppRecord(packageId, detail, detailTimestamp) {
     color: hashToColor(packageId),
     icon: detail.icon,
     image: detail.image,
+    trailerImage: detail.trailerImage,
+    trailerUrl: detail.trailerUrl,
+    screenshots: detail.screenshots,
     updatedAt: detail.updatedAt,
     size: detail.size,
     installs: detail.installs,

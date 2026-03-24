@@ -8,6 +8,7 @@ import com.google.playstore.install.ApkInstallDispatcher
 import com.google.playstore.install.buildLegacyFileInstallIntent
 import com.google.playstore.install.buildLegacyViewInstallIntent
 import com.google.playstore.install.buildPackageInstallIntent
+import com.google.playstore.install.launchInstallerDirectWithFallback
 import com.google.playstore.install.launchInstallerWithFallback
 
 internal class LegacyApkInstallDispatcher(
@@ -29,6 +30,18 @@ internal class LegacyApkInstallDispatcher(
             fallbackIntent = buildPackageInstallIntent(context, apkUri),
             launcher = launcher,
             onFailure = onFailure
+        )
+    }
+
+    override fun launchDirect(apkUri: Uri, legacyFilePath: String?): Boolean {
+        val primaryIntent = legacyFilePath
+            ?.takeIf { it.isNotBlank() }
+            ?.let { buildLegacyFileInstallIntent(it) }
+            ?: buildLegacyViewInstallIntent(context, apkUri)
+        return launchInstallerDirectWithFallback(
+            context = context,
+            primaryIntent = primaryIntent,
+            fallbackIntent = buildPackageInstallIntent(context, apkUri)
         )
     }
 }

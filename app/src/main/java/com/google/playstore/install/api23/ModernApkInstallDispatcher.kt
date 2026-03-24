@@ -7,6 +7,7 @@ import androidx.activity.result.ActivityResultLauncher
 import com.google.playstore.install.ApkInstallDispatcher
 import com.google.playstore.install.buildLegacyViewInstallIntent
 import com.google.playstore.install.buildPackageInstallIntent
+import com.google.playstore.install.launchInstallerDirectWithFallback
 import com.google.playstore.install.launchInstallerWithFallback
 
 internal class ModernApkInstallDispatcher(
@@ -24,6 +25,14 @@ internal class ModernApkInstallDispatcher(
             fallbackIntent = buildLegacyViewInstallIntent(context, apkUri),
             launcher = launcher,
             onFailure = onFailure
+        )
+    }
+
+    override fun launchDirect(apkUri: Uri, legacyFilePath: String?): Boolean {
+        return launchInstallerDirectWithFallback(
+            context = context,
+            primaryIntent = buildPackageInstallIntent(context, apkUri),
+            fallbackIntent = buildLegacyViewInstallIntent(context, apkUri)
         )
     }
 }

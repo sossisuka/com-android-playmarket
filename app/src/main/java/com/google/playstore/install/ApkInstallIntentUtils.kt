@@ -64,6 +64,25 @@ internal fun launchInstallerWithFallback(
     onFailure()
 }
 
+internal fun launchInstallerDirectWithFallback(
+    context: Context,
+    primaryIntent: Intent,
+    fallbackIntent: Intent
+): Boolean {
+    val directIntents = listOf(primaryIntent, fallbackIntent)
+    for (intent in directIntents) {
+        val intentForDirectStart = Intent(intent).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        grantReadPermissionToResolvedActivities(context, intentForDirectStart)
+        val launched = runCatching {
+            context.startActivity(intentForDirectStart)
+        }.isSuccess
+        if (launched) return true
+    }
+    return false
+}
+
 private fun grantReadPermissionToResolvedActivities(
     context: Context,
     intent: Intent

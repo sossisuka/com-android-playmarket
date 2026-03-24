@@ -87,6 +87,20 @@ class PlayApiClient(private val baseUrl: String) {
         )
     }
 
+    fun readUnsupportedApps(apiLevel: Int): Set<String> {
+        val json = getJson("/unsupported-apps?api=$apiLevel")
+        return json.optJSONArray("packageIds").toStringList().toSet()
+    }
+
+    fun reportUnsupportedApp(apiLevel: Int, packageId: String): Set<String> {
+        val payload = JSONObject().apply {
+            put("apiLevel", apiLevel)
+            put("packageId", packageId)
+        }
+        val json = requestJson("POST", "/unsupported-apps", body = payload)
+        return json.optJSONArray("packageIds").toStringList().toSet()
+    }
+
     fun readInitialSummaries(limit: Int = 300): List<StoreApp> {
         return readSummariesPage(offset = 0, limit = limit, mode = "all").items
     }

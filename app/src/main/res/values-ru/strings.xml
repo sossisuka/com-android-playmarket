@@ -1333,4 +1333,11 @@ CVC-код – это четырехзначное число, располож
 <string name="auth_sign_out">Выйти</string>
 <string name="drawer_settings_icon">Настройки</string>
 <string name="drawer_user_avatar">Профиль пользователя</string>
+<string name="install_notification_channel_name">Загрузки приложений</string>
+<string
+        name="install_notification_channel_description"
+    >Показывает ход загрузки и установки приложений.</string>
+<string
+        name="notification_installation_success_banner"
+    >Приложение \"%1$s\" успешно установлено.</string>
 </resources>
