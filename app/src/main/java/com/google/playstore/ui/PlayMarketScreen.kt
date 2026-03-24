@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.Settings
 import android.view.ContextThemeWrapper
 import android.widget.ImageView
@@ -108,6 +109,7 @@ import com.google.playstore.BuildConfig
 import com.google.playstore.R
 import com.google.playstore.data.AuthSessionStore
 import com.google.playstore.data.PlayApiClient
+import com.google.playstore.install.createApkInstallDispatcher
 import com.google.playstore.model.CatalogMode
 import com.google.playstore.model.DrawerSection
 import com.google.playstore.model.HomeBanner
@@ -131,6 +133,8 @@ private const val INSTALL_STAGE_DOWNLOADING = "downloading"
 private const val INSTALL_STAGE_INSTALLING = "installing"
 private const val INSTALL_PREPARATION_DURATION_MS = 3_000L
 private const val INSTALL_POLL_INTERVAL_MS = 500L
+private const val INSTALL_MONITOR_TIMEOUT_MS = 120_000L
+private const val EXTRA_INSTALL_RESULT = "android.intent.extra.INSTALL_RESULT"
 
 @Composable
 fun PlayMarketScreen() {
@@ -2432,6 +2436,7 @@ private fun AppDetailsPage(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val apiClient = remember { PlayApiClient(BuildConfig.PLAY_API_BASE_URL) }
+    val apkInstallDispatcher = remember(context) { createApkInstallDispatcher(context) }
     val packageManager = context.packageManager
     val uriHandler = LocalUriHandler.current
     val screenshotImages = remember(app.id, app.screenshots, app.iconUrl) {
@@ -2500,6 +2505,7 @@ private fun AppDetailsPage(
     var installErrorMessage by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
     var pendingApkCachePath by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
     var pendingInstallUri by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
+    var pendingLegacyInstallPath by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
     var installFlowJob by remember(app.id) { mutableStateOf<Job?>(null) }
     var installMonitorJob by remember(app.id) { mutableStateOf<Job?>(null) }
 
@@ -2507,8 +2513,12 @@ private fun AppDetailsPage(
         pendingApkCachePath?.let { cachedPath ->
             runCatching { File(cachedPath).delete() }
         }
+        pendingLegacyInstallPath?.let { cachedPath ->
+            runCatching { File(cachedPath).delete() }
+        }
         pendingApkCachePath = null
         pendingInstallUri = null
+        pendingLegacyInstallPath = null
         installDownloadedBytes = 0L
         installTotalBytes = null
     }
@@ -2538,9 +2548,19 @@ private fun AppDetailsPage(
     val startInstallMonitor = {
         installMonitorJob?.cancel()
         installMonitorJob = scope.launch {
+            val startedAt = System.currentTimeMillis()
             while (true) {
                 if (isAppInstalledOnDevice(context, app.id)) {
                     finishInstallSuccess()
+                    return@launch
+                }
+                if (System.currentTimeMillis() - startedAt >= INSTALL_MONITOR_TIMEOUT_MS) {
+                    resetInstallUi(
+                        tr(
+                            "Установка не завершилась вовремя. Попробуйте снова.",
+                            "Installation did not complete in time. Please try again."
+                        )
+                    )
                     return@launch
                 }
                 delay(INSTALL_POLL_INTERVAL_MS)
@@ -2551,23 +2571,41 @@ private fun AppDetailsPage(
     val installApkLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode != Activity.RESULT_OK) {
-            resetInstallUi(
-                tr(
-                    "Установка не завершена. Проверьте подтверждение в системном установщике.",
-                    "Installation not completed. Confirm installation in the system installer."
-                )
-            )
+        if (isAppInstalledOnDevice(context, app.id)) {
+            finishInstallSuccess()
             return@rememberLauncherForActivityResult
         }
 
-        if (isAppInstalledOnDevice(context, app.id)) {
-            finishInstallSuccess()
-        } else {
+        if (result.resultCode == Activity.RESULT_OK) {
             installStage = INSTALL_STAGE_INSTALLING
             installProgress = -1
             startInstallMonitor()
+            return@rememberLauncherForActivityResult
         }
+
+        val installResult = result.data?.getIntExtra(EXTRA_INSTALL_RESULT, Int.MIN_VALUE)
+        val isLegacyAmbiguousResult =
+            Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1 &&
+                result.resultCode == Activity.RESULT_CANCELED &&
+                installResult == Int.MIN_VALUE
+        if (isLegacyAmbiguousResult) {
+            installStage = INSTALL_STAGE_INSTALLING
+            installProgress = -1
+            startInstallMonitor()
+            return@rememberLauncherForActivityResult
+        }
+
+        val debugCode = if (installResult == null || installResult == Int.MIN_VALUE) {
+            "result=${result.resultCode}"
+        } else {
+            "result=${result.resultCode}, install=$installResult"
+        }
+        resetInstallUi(
+            tr(
+                "Установка не завершена ($debugCode). Проверьте подтверждение в системном установщике.",
+                "Installation not completed ($debugCode). Confirm installation in the system installer."
+            )
+        )
     }
 
     val unknownSourcesLauncher = rememberLauncherForActivityResult(
@@ -2599,29 +2637,36 @@ private fun AppDetailsPage(
         installStage = INSTALL_STAGE_INSTALLING
         installProgress = -1
         startInstallMonitor()
-
-        val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-            data = Uri.parse(uriString)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            putExtra(Intent.EXTRA_RETURN_RESULT, true)
-        }
-
-        runCatching {
-            installApkLauncher.launch(installIntent)
-        }.onFailure {
-            resetInstallUi(
-                tr(
-                    "Не удалось запустить установщик APK.",
-                    "Failed to start APK installer."
+        apkInstallDispatcher.launch(
+            apkUri = Uri.parse(uriString),
+            legacyFilePath = pendingLegacyInstallPath,
+            launcher = installApkLauncher,
+            onFailure = {
+                resetInstallUi(
+                    tr(
+                        "Не удалось запустить установщик APK.",
+                        "Failed to start APK installer."
+                    )
                 )
-            )
-        }
+            }
+        )
     }
 
     val startInstallFlow = startInstallFlow@{
         if (!isAuthenticated) {
             installErrorMessage = null
             showInstallAuthDialog = true
+            return@startInstallFlow
+        }
+        val requiredApi = parseRequiresAndroidApiLevel(app.requiresAndroid)
+        if (requiredApi != null && Build.VERSION.SDK_INT < requiredApi) {
+            val requiredLabel = app.requiresAndroid.ifBlank { "API $requiredApi" }
+            resetInstallUi(
+                tr(
+                    "Приложение требует Android $requiredLabel (API $requiredApi). На устройстве Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}).",
+                    "This app requires Android $requiredLabel (API $requiredApi). Device is Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})."
+                )
+            )
             return@startInstallFlow
         }
         installFlowJob?.cancel()
@@ -2664,11 +2709,12 @@ private fun AppDetailsPage(
                     }
                     apkCacheFile
                 }
-            }.onFailure {
+            }.onFailure { failure ->
+                val errorSuffix = failure.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""
                 resetInstallUi(
                     tr(
-                        "Не удалось скачать APK из локального API.",
-                        "Failed to download APK from local API."
+                        "Не удалось скачать APK из локального API$errorSuffix",
+                        "Failed to download APK from local API$errorSuffix"
                     )
                 )
                 runCatching { apkCacheFile.delete() }
@@ -2690,13 +2736,57 @@ private fun AppDetailsPage(
                 runCatching { downloadedFile.delete() }
             }.getOrNull() ?: return@launch
 
+            val legacyInstallPath = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                runCatching {
+                    val externalBaseDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                        ?: context.getExternalFilesDir(null)
+                        ?: context.cacheDir
+                    val legacyDir = File(externalBaseDir, "apk-installer")
+                    if (!legacyDir.exists()) {
+                        legacyDir.mkdirs()
+                    }
+                    val legacyFile = File(legacyDir, "${app.id}.apk")
+                    if (legacyFile.exists()) {
+                        legacyFile.delete()
+                    }
+                    downloadedFile.copyTo(legacyFile, overwrite = true)
+                    legacyFile.absolutePath
+                }.getOrNull()
+            } else {
+                null
+            }
+
             pendingApkCachePath = downloadedFile.absolutePath
             pendingInstallUri = apkUri.toString()
+            pendingLegacyInstallPath = legacyInstallPath
             val finalSize = downloadedFile.length().coerceAtLeast(0L)
             installDownloadedBytes = finalSize
             installTotalBytes = installTotalBytes ?: finalSize
             installProgress = 100
             installFlowJob = null
+            val parsedPackageName = runCatching {
+                packageManager.getPackageArchiveInfo(downloadedFile.absolutePath, 0)?.packageName
+            }.getOrNull()
+            if (parsedPackageName.isNullOrBlank()) {
+                resetInstallUi(
+                    tr(
+                        "Скачанный APK не прошёл проверку PackageManager (INVALID_APK). Попробуйте ещё раз.",
+                        "Downloaded APK failed PackageManager verification (INVALID_APK). Please retry."
+                    )
+                )
+                runCatching { downloadedFile.delete() }
+                return@launch
+            }
+            if (!parsedPackageName.equals(app.id, ignoreCase = true)) {
+                resetInstallUi(
+                    tr(
+                        "Пакет APK не совпадает: ожидался ${app.id}, получен $parsedPackageName.",
+                        "APK package mismatch: expected ${app.id}, got $parsedPackageName."
+                    )
+                )
+                runCatching { downloadedFile.delete() }
+                return@launch
+            }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
                 !context.packageManager.canRequestPackageInstalls()
@@ -2723,22 +2813,19 @@ private fun AppDetailsPage(
             installStage = INSTALL_STAGE_INSTALLING
             installProgress = -1
             startInstallMonitor()
-            val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-                data = apkUri
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                putExtra(Intent.EXTRA_RETURN_RESULT, true)
-            }
-
-            runCatching {
-                installApkLauncher.launch(installIntent)
-            }.onFailure {
-                resetInstallUi(
-                    tr(
-                        "Не удалось запустить установщик APK.",
-                        "Failed to start APK installer."
+            apkInstallDispatcher.launch(
+                apkUri = apkUri,
+                legacyFilePath = pendingLegacyInstallPath,
+                launcher = installApkLauncher,
+                onFailure = {
+                    resetInstallUi(
+                        tr(
+                            "Не удалось запустить установщик APK.",
+                            "Failed to start APK installer."
+                        )
                     )
-                )
-            }
+                }
+            )
         }
     }
 
@@ -4363,6 +4450,51 @@ private fun parseInstallsEstimate(raw: String): Long {
         .mapNotNull { it.toLongOrNull() }
         .toList()
     return nums.maxOrNull() ?: 0L
+}
+
+private fun parseRequiresAndroidApiLevel(raw: String): Int? {
+    if (raw.isBlank()) return null
+    val lower = raw.lowercase(Locale.US)
+    if (lower.contains("varies")) return null
+
+    val match = Regex("""(\d+)(?:\.(\d+))?""").find(lower) ?: return null
+    val major = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return null
+    val minor = match.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
+
+    return when (major) {
+        1 -> when {
+            minor <= 1 -> 2
+            minor == 5 -> 3
+            minor == 6 -> 4
+            else -> null
+        }
+        2 -> when {
+            minor <= 0 -> 5
+            minor == 1 -> 7
+            minor == 2 -> 8
+            else -> 10
+        }
+        3 -> 11
+        4 -> when {
+            minor <= 0 -> 14
+            minor == 1 -> 16
+            minor == 2 -> 17
+            minor == 3 -> 18
+            else -> 19
+        }
+        5 -> if (minor >= 1) 22 else 21
+        6 -> 23
+        7 -> if (minor >= 1) 25 else 24
+        8 -> if (minor >= 1) 27 else 26
+        9 -> 28
+        10 -> 29
+        11 -> 30
+        12 -> if (minor >= 1) 32 else 31
+        13 -> 33
+        14 -> 34
+        15 -> 35
+        else -> 36
+    }
 }
 
 @Preview(showBackground = true)

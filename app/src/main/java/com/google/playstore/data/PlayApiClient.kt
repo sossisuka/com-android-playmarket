@@ -1,5 +1,7 @@
 package com.google.playstore.data
 
+import android.util.Log
+import android.os.Build
 import androidx.compose.ui.graphics.Color
 import com.google.playstore.model.HomeBanner
 import com.google.playstore.model.HomeFeedSection
@@ -11,6 +13,7 @@ import com.google.playstore.model.FavoriteAppsPayload
 import com.google.playstore.model.FavoriteMutationResult
 import com.google.playstore.model.StoreApp
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -22,6 +25,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class PlayApiClient(private val baseUrl: String) {
+    private companion object {
+        private const val TAG = "PlayApiClient"
+    }
     fun register(
         email: String,
         password: String,
@@ -150,11 +156,57 @@ class PlayApiClient(private val baseUrl: String) {
     ) {
         val encodedId = encodeUrlPart(packageId)
         val url = URL(baseUrl.trimEnd('/') + "/apk/$encodedId")
+        val attempts = listOf(
+            20_000 to 90_000,
+            30_000 to 240_000
+        )
+
+        var lastError: Throwable? = null
+        for ((index, attempt) in attempts.withIndex()) {
+            val (connectTimeoutMs, readTimeoutMs) = attempt
+            runCatching {
+                downloadApkAttempt(
+                    url = url,
+                    destinationFile = destinationFile,
+                    connectTimeoutMs = connectTimeoutMs,
+                    readTimeoutMs = readTimeoutMs,
+                    onProgress = onProgress
+                )
+            }.onSuccess {
+                return
+            }.onFailure { failure ->
+                lastError = failure
+                Log.w(
+                    TAG,
+                    "APK download attempt ${index + 1}/${attempts.size} failed for $packageId: ${failure.message}",
+                    failure
+                )
+                runCatching { destinationFile.delete() }
+                if (index < attempts.lastIndex) {
+                    onProgress?.invoke(0L, -1L)
+                }
+            }
+        }
+
+        val message = lastError?.message?.takeIf { it.isNotBlank() } ?: "unknown error"
+        Log.e(TAG, "APK download failed after retries for $packageId: $message", lastError)
+        throw IOException("APK download failed after retries: $message", lastError)
+    }
+
+    private fun downloadApkAttempt(
+        url: URL,
+        destinationFile: File,
+        connectTimeoutMs: Int,
+        readTimeoutMs: Int,
+        onProgress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)?
+    ) {
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
-            connectTimeout = 15_000
-            readTimeout = 60_000
+            connectTimeout = connectTimeoutMs
+            readTimeout = readTimeoutMs
+            instanceFollowRedirects = true
             setRequestProperty("Accept", "application/vnd.android.package-archive")
+            setRequestProperty("Connection", "close")
         }
 
         try {
@@ -164,11 +216,14 @@ class PlayApiClient(private val baseUrl: String) {
                     ?.bufferedReader(Charsets.UTF_8)
                     ?.use { it.readText() }
                     .orEmpty()
-                val message = errorText.ifBlank { "HTTP $code" }
-                error("APK download failed ($code): $message")
+                val contentType = connection.contentType.orEmpty()
+                val message = errorText.ifBlank {
+                    if (contentType.isBlank()) "HTTP $code" else "HTTP $code, contentType=$contentType"
+                }
+                throw IOException("APK endpoint error: $message")
             }
 
-            val totalBytes = connection.contentLengthLong.takeIf { it > 0L } ?: -1L
+            val totalBytes = contentLengthCompat(connection)
             onProgress?.invoke(0L, totalBytes)
             destinationFile.parentFile?.mkdirs()
             connection.inputStream.use { input ->
@@ -207,6 +262,15 @@ class PlayApiClient(private val baseUrl: String) {
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun contentLengthCompat(connection: HttpURLConnection): Long {
+        val value = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            connection.contentLengthLong
+        } else {
+            connection.contentLength.toLong()
+        }
+        return value.takeIf { it > 0L } ?: -1L
     }
 
     fun readHome(mode: String): HomePayload {
