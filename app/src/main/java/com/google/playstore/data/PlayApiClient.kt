@@ -161,7 +161,12 @@ class PlayApiClient(private val baseUrl: String) {
     }
 
     fun readById(appId: String): StoreApp? {
-        val json = getJson("/apps/${encodeUrlPart(appId)}")
+        val encodedId = encodeUrlPart(appId)
+        val primary = runCatching { getJson("/apps/$encodedId") }.getOrNull()
+        val json = when {
+            primary?.has("app") == true -> primary
+            else -> runCatching { getJson("/app?id=$encodedId") }.getOrNull()
+        } ?: return null
         if (!json.has("app")) return null
         return mapJsonToStoreApp(json.optJSONObject("app") ?: return null, includeMedia = true)
     }

@@ -1,6 +1,7 @@
 ﻿package com.google.playstore.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -62,6 +63,8 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -84,6 +87,7 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
@@ -108,7 +112,6 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
-import coil.compose.rememberAsyncImagePainter
 import com.google.playstore.BuildConfig
 import com.google.playstore.R
 import com.google.playstore.data.AuthSessionStore
@@ -139,6 +142,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayMarketScreen() {
     var apps by remember { mutableStateOf<List<StoreApp>>(emptyList()) }
@@ -173,6 +177,7 @@ fun PlayMarketScreen() {
     val scope = rememberCoroutineScope()
     val apiClient = remember { PlayApiClient(BuildConfig.PLAY_API_BASE_URL) }
     val context = LocalContext.current
+    val activity = context as? Activity
     val appContext = remember(context) { context.applicationContext }
     val installCoordinator = remember(appContext, apiClient) {
         AppInstallCoordinator(appContext, apiClient)
@@ -185,6 +190,22 @@ fun PlayMarketScreen() {
         contract = ActivityResultContracts.RequestPermission()
     ) { }
     val headerSearchMode = searchMode && selectedApp == null && authMode == null
+    var pullRefreshInProgress by remember { mutableStateOf(false) }
+    val canPullRefresh = !loading && authMode == null && selectedApp == null
+    val handlePullRefresh = {
+        if (canPullRefresh && !pullRefreshInProgress) {
+            pullRefreshInProgress = true
+            scope.launch {
+                // Small delay keeps the refresh indicator visible before Activity recreation.
+                delay(220)
+                if (activity != null) {
+                    activity.recreate()
+                } else {
+                    pullRefreshInProgress = false
+                }
+            }
+        }
+    }
     val ensureNotificationPermission = {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(
@@ -634,55 +655,61 @@ fun PlayMarketScreen() {
                     Text("Ошибка загрузки данных API\n$error", color = Color(0xFF333333), fontSize = 14.sp)
                 }
                 else -> Box(Modifier.fillMaxSize()) {
-                    if (showInstalledPackages) {
-                        InstalledPackagesPage(
-                            apiClient = apiClient,
-                            storeApps = apps,
-                            loadingCatalog = fullCatalogLoading,
-                            installedAppsRefreshKey = installedAppsRefreshKey,
-                            onAppClick = onAppClick
-                        )
-                    } else if (showWishlist) {
-                        WishlistPage(
-                            apps = wishlistApps,
-                            loading = wishlistLoading,
-                            error = wishlistError,
-                            installedAppsRefreshKey = installedAppsRefreshKey,
-                            activeInstallSession = installSession,
-                            onRetry = {
-                                val token = authToken.orEmpty()
-                                if (token.isNotBlank()) {
-                                    scope.launch { loadWishlistFromApi(token) }
-                                }
-                            },
-                            onAppClick = onAppClick
-                        )
-                    } else if (searchMode) {
-                        SearchResultsPage(
-                            query = searchQuery,
-                            apiClient = apiClient,
-                            catalogMode = catalogMode,
-                            installedAppsRefreshKey = installedAppsRefreshKey,
-                            activeInstallSession = installSession,
-                            onAppClick = onAppClick
-                        )
-                    } else {
-                        MainTabsPager(
-                            current = tab,
-                            onTabChange = {
-                                tab = it
-                                if (it != HomeTab.Categories) selectedCategory = null
-                            },
-                            apps = catalogApps,
-                            homePayload = homePayload,
-                            apiClient = apiClient,
-                            catalogMode = catalogMode,
-                            selectedCategory = selectedCategory,
-                            installedAppsRefreshKey = installedAppsRefreshKey,
-                            activeInstallSession = installSession,
-                            onCategoryClick = { selectedCategory = it },
-                            onAppClick = onAppClick
-                        )
+                    PullToRefreshBox(
+                        isRefreshing = pullRefreshInProgress,
+                        onRefresh = handlePullRefresh,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        if (showInstalledPackages) {
+                            InstalledPackagesPage(
+                                apiClient = apiClient,
+                                storeApps = apps,
+                                loadingCatalog = fullCatalogLoading,
+                                installedAppsRefreshKey = installedAppsRefreshKey,
+                                onAppClick = onAppClick
+                            )
+                        } else if (showWishlist) {
+                            WishlistPage(
+                                apps = wishlistApps,
+                                loading = wishlistLoading,
+                                error = wishlistError,
+                                installedAppsRefreshKey = installedAppsRefreshKey,
+                                activeInstallSession = installSession,
+                                onRetry = {
+                                    val token = authToken.orEmpty()
+                                    if (token.isNotBlank()) {
+                                        scope.launch { loadWishlistFromApi(token) }
+                                    }
+                                },
+                                onAppClick = onAppClick
+                            )
+                        } else if (searchMode) {
+                            SearchResultsPage(
+                                query = searchQuery,
+                                apiClient = apiClient,
+                                catalogMode = catalogMode,
+                                installedAppsRefreshKey = installedAppsRefreshKey,
+                                activeInstallSession = installSession,
+                                onAppClick = onAppClick
+                            )
+                        } else {
+                            MainTabsPager(
+                                current = tab,
+                                onTabChange = {
+                                    tab = it
+                                    if (it != HomeTab.Categories) selectedCategory = null
+                                },
+                                apps = catalogApps,
+                                homePayload = homePayload,
+                                apiClient = apiClient,
+                                catalogMode = catalogMode,
+                                selectedCategory = selectedCategory,
+                                installedAppsRefreshKey = installedAppsRefreshKey,
+                                activeInstallSession = installSession,
+                                onCategoryClick = { selectedCategory = it },
+                                onAppClick = onAppClick
+                            )
+                        }
                     }
 
                     if (selectedApp != null) {
@@ -4728,6 +4755,53 @@ private fun LegacyStarIcons(
 
 private fun ratingForCard(app: StoreApp): Float = app.ratingValue.takeIf { it > 0f } ?: derivedAverageRating(app.reviews)
 
+private fun buildMediaProxyUrl(rawUrl: String): String {
+    val value = rawUrl.trim()
+    if (value.isBlank()) return ""
+    val base = BuildConfig.PLAY_API_BASE_URL.trim().trimEnd('/')
+    if (base.isBlank()) return ""
+    return "$base/media?url=${Uri.encode(value)}"
+}
+
+@Composable
+private fun ResilientAsyncImage(
+    imageUrl: String,
+    modifier: Modifier = Modifier,
+    contentDescription: String? = null,
+    contentScale: ContentScale = ContentScale.Crop,
+    placeholder: Painter? = null,
+    error: Painter? = null,
+    fallback: Painter? = null,
+    onSuccess: ((AsyncImagePainter.State.Success) -> Unit)? = null
+) {
+    val primaryUrl = imageUrl.trim()
+    val proxyUrl = remember(primaryUrl) { buildMediaProxyUrl(primaryUrl) }
+    var currentUrl by remember(primaryUrl) { mutableStateOf(primaryUrl) }
+    var proxyTried by remember(primaryUrl) { mutableStateOf(false) }
+
+    AsyncImage(
+        model = currentUrl,
+        contentDescription = contentDescription,
+        modifier = modifier,
+        contentScale = contentScale,
+        placeholder = placeholder,
+        error = error,
+        fallback = fallback,
+        onError = {
+            if (
+                !proxyTried &&
+                primaryUrl.isNotBlank() &&
+                proxyUrl.isNotBlank() &&
+                proxyUrl != primaryUrl
+            ) {
+                proxyTried = true
+                currentUrl = proxyUrl
+            }
+        },
+        onSuccess = { state -> onSuccess?.invoke(state) }
+    )
+}
+
 @Composable
 private fun AdaptiveMediaCard(
     imageUrl: String,
@@ -4745,8 +4819,8 @@ private fun AdaptiveMediaCard(
             .let { base -> if (onClick != null) base.clickable { onClick() } else base },
         contentAlignment = Alignment.Center
     ) {
-        AsyncImage(
-            model = imageUrl,
+        ResilientAsyncImage(
+            imageUrl = imageUrl,
             contentDescription = null,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop,
@@ -4990,27 +5064,25 @@ private fun AppIconImage(url: String, iconSize: Dp, cornerRadius: Dp = 9.dp) {
         return
     }
 
-    val painter = rememberAsyncImagePainter(
-        model = url,
-        placeholder = painterResource(R.mipmap.ic_menu_play_store),
-        error = painterResource(R.mipmap.ic_menu_play_store),
-        fallback = painterResource(R.mipmap.ic_menu_play_store)
-    )
-    val state = painter.state
+    var loaded by remember(url) { mutableStateOf(false) }
 
     Box(modifier = clippedModifier) {
-        if (state !is AsyncImagePainter.State.Success) {
+        if (!loaded) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color(0xFFD8D8D8))
             )
         }
-        Image(
-            painter = painter,
+        ResilientAsyncImage(
+            imageUrl = url,
             contentDescription = null,
             modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop
+            contentScale = ContentScale.Crop,
+            placeholder = painterResource(R.mipmap.ic_menu_play_store),
+            error = painterResource(R.mipmap.ic_menu_play_store),
+            fallback = painterResource(R.mipmap.ic_menu_play_store),
+            onSuccess = { loaded = true }
         )
     }
 }

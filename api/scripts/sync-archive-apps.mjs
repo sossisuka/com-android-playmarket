@@ -4,14 +4,15 @@ import path from "node:path";
 import { runSyncPackages } from "./sync-google-play.mjs";
 
 const APPS_FILE = path.resolve("src/data/apps.generated.ts");
-const ROOT_APPS_FILE = path.resolve("../apps.generated.ts");
 const ICONS_DIR = path.resolve("src/data/icons");
+const MISSING_APPS_FILE = path.resolve("src/data/missing_apps.json");
 const EXPORT_NAME = "generatedStoreApps";
 const CURRENT_YEAR = new Date().getUTCFullYear();
+const MIN_ARCHIVE_YEAR = 2012;
 const DEFAULT_FROM_YEAR = Number.parseInt(
   process.env.PLAY_ARCHIVE_SYNC_FROM_YEAR ??
     process.env.PLAY_ARCHIVE_SYNC_YEAR ??
-    "2013",
+    String(MIN_ARCHIVE_YEAR),
   10,
 );
 const DEFAULT_TO_YEAR = Number.parseInt(
@@ -30,6 +31,18 @@ const DEFAULT_TIMEOUT_MS = Number.parseInt(
   process.env.PLAY_ARCHIVE_SYNC_TIMEOUT_MS ?? "20000",
   10,
 );
+const DEFAULT_FALLBACK_STEP_TIMEOUT_MS = Number.parseInt(
+  process.env.PLAY_ARCHIVE_SYNC_FALLBACK_STEP_TIMEOUT_MS ?? "25000",
+  10,
+);
+const DEFAULT_DETAIL_PROBE_LIMIT = Number.parseInt(
+  process.env.PLAY_ARCHIVE_SYNC_DETAIL_PROBE_LIMIT ?? "12",
+  10,
+);
+const DEFAULT_MEDIA_VALIDATE_TIMEOUT_MS = Number.parseInt(
+  process.env.PLAY_ARCHIVE_SYNC_MEDIA_VALIDATE_TIMEOUT_MS ?? "8000",
+  10,
+);
 const DEFAULT_RETRY_COUNT = Number.parseInt(
   process.env.PLAY_ARCHIVE_SYNC_RETRIES ?? "4",
   10,
@@ -40,6 +53,10 @@ const DEFAULT_PAGE_LIMIT = Number.parseInt(
 );
 const DEFAULT_APP_LIMIT = Number.parseInt(
   process.env.PLAY_ARCHIVE_SYNC_APP_LIMIT ?? "0",
+  10,
+);
+const DEFAULT_SNAPSHOT_CONCURRENCY = Number.parseInt(
+  process.env.PLAY_ARCHIVE_SYNC_SNAPSHOT_CONCURRENCY ?? "3",
   10,
 );
 const CDX_CALLS_PER_SECOND = Number.parseFloat(
@@ -144,6 +161,8 @@ const CATEGORY_GAME_SLUGS = new Set([
 ]);
 const MONTHS = new Map([
   ["january", 1],
+  ["tammikuu", 1],
+  ["tammikuuta", 1],
   ["jan", 1],
   ["januar", 1],
   ["janvier", 1],
@@ -152,6 +171,8 @@ const MONTHS = new Map([
   ["janeiro", 1],
   ["stycznia", 1],
   ["february", 2],
+  ["helmikuu", 2],
+  ["helmikuuta", 2],
   ["feb", 2],
   ["februar", 2],
   ["fevrier", 2],
@@ -161,41 +182,55 @@ const MONTHS = new Map([
   ["febbraio", 2],
   ["lutego", 2],
   ["march", 3],
+  ["maaliskuu", 3],
+  ["maaliskuuta", 3],
   ["mar", 3],
   ["marz", 3],
   ["mars", 3],
   ["marzo", 3],
   ["marca", 3],
   ["april", 4],
+  ["huhtikuu", 4],
+  ["huhtikuuta", 4],
   ["apr", 4],
   ["avril", 4],
   ["abril", 4],
   ["aprile", 4],
   ["kwietnia", 4],
   ["may", 5],
+  ["toukokuu", 5],
+  ["toukokuuta", 5],
   ["mai", 5],
   ["mayo", 5],
   ["maio", 5],
   ["maggio", 5],
   ["maja", 5],
   ["june", 6],
+  ["kesakuu", 6],
+  ["kesakuuta", 6],
   ["jun", 6],
   ["juin", 6],
   ["junio", 6],
   ["giugno", 6],
   ["czerwca", 6],
   ["july", 7],
+  ["heinakuu", 7],
+  ["heinakuuta", 7],
   ["jul", 7],
   ["juillet", 7],
   ["julio", 7],
   ["luglio", 7],
   ["lipca", 7],
   ["august", 8],
+  ["elokuu", 8],
+  ["elokuuta", 8],
   ["aug", 8],
   ["aout", 8],
   ["agosto", 8],
   ["sierpnia", 8],
   ["september", 9],
+  ["syyskuu", 9],
+  ["syyskuuta", 9],
   ["sep", 9],
   ["sept", 9],
   ["septembre", 9],
@@ -203,6 +238,8 @@ const MONTHS = new Map([
   ["settembre", 9],
   ["wrzesnia", 9],
   ["october", 10],
+  ["lokakuu", 10],
+  ["lokakuuta", 10],
   ["oct", 10],
   ["oktober", 10],
   ["octobre", 10],
@@ -210,11 +247,15 @@ const MONTHS = new Map([
   ["ottobre", 10],
   ["pazdziernika", 10],
   ["november", 11],
+  ["marraskuu", 11],
+  ["marraskuuta", 11],
   ["nov", 11],
   ["novembre", 11],
   ["noviembre", 11],
   ["listopada", 11],
   ["december", 12],
+  ["joulukuu", 12],
+  ["joulukuuta", 12],
   ["dec", 12],
   ["dezember", 12],
   ["decembre", 12],
@@ -223,6 +264,69 @@ const MONTHS = new Map([
   ["dezembro", 12],
   ["grudnia", 12],
 ]);
+
+function normalizePackageIds(values) {
+  if (!Array.isArray(values)) return [];
+  return [
+    ...new Set(
+      values
+        .filter((item) => typeof item === "string")
+        .map((item) => item.trim())
+        .filter((item) => PACKAGE_ID_RE.test(item)),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+}
+
+async function loadMissingApps(filePath) {
+  try {
+    const text = await readFile(filePath, "utf8");
+    return new Set(normalizePackageIds(JSON.parse(text)));
+  } catch (error) {
+    if (error?.code === "ENOENT") return new Set();
+    throw error;
+  }
+}
+
+async function saveMissingApps(filePath, missingApps) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const payload = normalizePackageIds([...missingApps]);
+  await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function markMissingApp(packageId, reason, missingApps) {
+  const id = String(packageId ?? "").trim();
+  if (!PACKAGE_ID_RE.test(id)) return;
+  if (missingApps.has(id)) return;
+  missingApps.add(id);
+  await saveMissingApps(MISSING_APPS_FILE, missingApps);
+  logArchiveSync("missing:add", `id=${id} reason=${reason}`);
+}
+
+async function unmarkMissingApp(packageId, reason, missingApps) {
+  const id = String(packageId ?? "").trim();
+  if (!PACKAGE_ID_RE.test(id)) return false;
+  if (!missingApps.has(id)) return false;
+  missingApps.delete(id);
+  await saveMissingApps(MISSING_APPS_FILE, missingApps);
+  logArchiveSync("missing:remove", `id=${id} reason=${reason}`);
+  return true;
+}
+
+async function reconcileMissingApps(existingIds, missingApps) {
+  let changed = false;
+  for (const packageId of existingIds) {
+    if (!missingApps.has(packageId)) continue;
+    missingApps.delete(packageId);
+    changed = true;
+    logArchiveSync(
+      "missing:reconcile",
+      `id=${packageId} reason=already-present-in-apps`,
+    );
+  }
+  if (changed) {
+    await saveMissingApps(MISSING_APPS_FILE, missingApps);
+  }
+}
 
 function parseArgs(argv) {
   const options = {
@@ -235,6 +339,7 @@ function parseArgs(argv) {
     skipIcons: false,
     iconYear: DEFAULT_ICON_YEAR,
     iconChunkSize: DEFAULT_ICON_CHUNK_SIZE,
+    snapshotConcurrency: DEFAULT_SNAPSHOT_CONCURRENCY,
     dryRun: false,
   };
 
@@ -307,6 +412,14 @@ function parseArgs(argv) {
         arg.slice("--icon-chunk-size=".length),
         10,
       );
+      continue;
+    }
+
+    if (arg.startsWith("--snapshot-concurrency=")) {
+      options.snapshotConcurrency = Number.parseInt(
+        arg.slice("--snapshot-concurrency=".length),
+        10,
+      );
     }
   }
 
@@ -314,8 +427,14 @@ function parseArgs(argv) {
 }
 
 function assertYear(year, label) {
-  if (!Number.isInteger(year) || !YEAR_RE.test(String(year)) || year < 2013) {
-    throw new Error(`${label} must be a 4-digit year >= 2013. Got: ${year}`);
+  if (
+    !Number.isInteger(year) ||
+    !YEAR_RE.test(String(year)) ||
+    year < MIN_ARCHIVE_YEAR
+  ) {
+    throw new Error(
+      `${label} must be a 4-digit year >= ${MIN_ARCHIVE_YEAR}. Got: ${year}`,
+    );
   }
 
   if (year > CURRENT_YEAR) {
@@ -337,6 +456,31 @@ function resolveYearRange(fromYear, toYear) {
     { length: toYear - fromYear + 1 },
     (_, index) => fromYear + index,
   );
+}
+
+function normalizeRequestedYearRange(options) {
+  const normalized = { ...options };
+  if (
+    Number.isInteger(normalized.fromYear) &&
+    normalized.fromYear < MIN_ARCHIVE_YEAR
+  ) {
+    console.warn(
+      `[archive-sync] fromYear ${normalized.fromYear} is below supported range, using ${MIN_ARCHIVE_YEAR}`,
+    );
+    normalized.fromYear = MIN_ARCHIVE_YEAR;
+  }
+
+  if (
+    Number.isInteger(normalized.toYear) &&
+    normalized.toYear < MIN_ARCHIVE_YEAR
+  ) {
+    console.warn(
+      `[archive-sync] toYear ${normalized.toYear} is below supported range, using ${MIN_ARCHIVE_YEAR}`,
+    );
+    normalized.toYear = MIN_ARCHIVE_YEAR;
+  }
+
+  return normalized;
 }
 
 function toPositiveInt(value, fallback) {
@@ -434,7 +578,7 @@ function serializeApps(apps) {
     "",
     "// AUTO-GENERATED FILE. DO NOT EDIT BY HAND.",
     `// Generated at: ${new Date().toISOString()}`,
-    "// Source: Google Play archive sync (web.archive.org, 2013+ pages).",
+    `// Source: Google Play archive sync (web.archive.org, ${MIN_ARCHIVE_YEAR}+ pages).`,
     "",
     `export const ${EXPORT_NAME}: AppData[] = ${JSON.stringify(apps, null, 2)};`,
     "",
@@ -505,6 +649,54 @@ function normalizeArchiveMediaUrl(value) {
   return raw;
 }
 
+function sanitizeMediaUrl(value) {
+  const raw = normalizeArchiveMediaUrl(value);
+  if (!raw) return "";
+
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    if (host === "web.archive.org") return "";
+  } catch {
+    return "";
+  }
+
+  return raw;
+}
+
+function sanitizeMediaList(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values ?? []) {
+    const normalized = sanitizeMediaUrl(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function mediaIdentityKey(value) {
+  const raw = normalizeArchiveMediaUrl(value);
+  if (!raw) return "";
+
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    let pathname = parsed.pathname;
+    if (
+      host.endsWith(".ggpht.com") ||
+      host === "ggpht.com" ||
+      host.endsWith("googleusercontent.com")
+    ) {
+      pathname = pathname.replace(/=[^/?#]+$/i, "");
+    }
+    return `${host}${pathname}`;
+  } catch {
+    return raw;
+  }
+}
+
 function isDirectMediaUrl(value) {
   const raw = String(value ?? "").trim();
   if (!raw) return false;
@@ -535,7 +727,7 @@ function collectAllMatches(value, pattern, groupIndex = 1) {
 }
 
 function normalizeYoutubeUrl(rawUrl) {
-  const value = String(rawUrl ?? "").trim();
+  const value = normalizeArchiveMediaUrl(String(rawUrl ?? "").trim());
   if (!value) return undefined;
 
   let parsed;
@@ -560,8 +752,25 @@ function normalizeYoutubeUrl(rawUrl) {
   if (pathParts[0] === "embed" && pathParts[1]) {
     return `https://www.youtube.com/watch?v=${pathParts[1]}`;
   }
+  if (pathParts[0] === "v" && pathParts[1]) {
+    return `https://www.youtube.com/watch?v=${pathParts[1]}`;
+  }
 
-  return value;
+  return undefined;
+}
+
+function buildYoutubeThumbnailUrl(rawUrl) {
+  const normalized = normalizeYoutubeUrl(rawUrl);
+  if (!normalized) return "";
+
+  try {
+    const parsed = new URL(normalized);
+    const videoId = parsed.searchParams.get("v");
+    if (!videoId) return "";
+    return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+  } catch {
+    return "";
+  }
 }
 
 function pickFirstMediaUrl(candidates) {
@@ -577,6 +786,34 @@ function extractDetailMedia(html) {
   const screenshotCandidates = [
     ...collectAllMatches(
       html,
+      /<div[^>]*class="[^"]*\bscreenshot-image-wrapper\b[^"]*"[^>]*data-baseurl="([^"]+)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<img[^>]*data-screenshot-index="[^"]+"[^>]*data-src="([^"]+)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<img[^>]*data-screenshot-index="[^"]+"[^>]*src="([^"]+)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<button[^>]*data-screenshot-item-index="[^"]+"[^>]*>\s*<img[^>]*data-src="([^"]+)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<button[^>]*data-screenshot-item-index="[^"]+"[^>]*>\s*<img[^>]*src="([^"]+)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<img[^>]*itemprop="screenshot"[^>]*src="([^"]+)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<img[^>]*src="([^"]+)"[^>]*itemprop="screenshot"/gi,
+    ),
+    ...collectAllMatches(
+      html,
       /<img[^>]*class="[^"]*\bfull-screenshot\b[^"]*"[^>]*src="([^"]+)"/gi,
     ),
     ...collectAllMatches(
@@ -588,14 +825,28 @@ function extractDetailMedia(html) {
   const screenshotSeen = new Set();
   for (const candidate of screenshotCandidates) {
     const normalized = normalizeArchiveMediaUrl(candidate);
-    if (!isDirectMediaUrl(normalized) || screenshotSeen.has(normalized)) {
+    const identity = mediaIdentityKey(normalized);
+    if (
+      !isDirectMediaUrl(normalized) ||
+      !identity ||
+      screenshotSeen.has(identity)
+    ) {
       continue;
     }
-    screenshotSeen.add(normalized);
+    screenshotSeen.add(identity);
     screenshots.push(normalized);
   }
 
-  const trailerImage = pickFirstMediaUrl([
+  let trailerImage = pickFirstMediaUrl([
+    ...collectAllMatches(html, /<video[^>]*poster="([^"]+)"/gi),
+    ...collectAllMatches(
+      html,
+      /<div[^>]*class="[^"]*\bMSLVtf\b[^"]*"[\s\S]*?<img[^>]*src="([^"]+)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<span[^>]*class="[^"]*\bdetails-trailer\b[^"]*"[\s\S]*?<img[^>]*class="[^"]*\bvideo-image\b[^"]*"[^>]*src="([^"]+)"/gi,
+    ),
     ...collectAllMatches(
       html,
       /<img[^>]*class="[^"]*\bvideo-image\b[^"]*"[^>]*src="([^"]+)"/gi,
@@ -608,10 +859,23 @@ function extractDetailMedia(html) {
 
   let trailerUrl;
   for (const candidate of [
+    ...collectAllMatches(html, /data-trailer-url="([^"]+)"/gi),
+    ...collectAllMatches(
+      html,
+      /<span[^>]*class="[^"]*\b(?:preview-overlay-container|play-action-container)\b[^"]*"[^>]*data-video-url="([^"]+)"/gi,
+    ),
     ...collectAllMatches(html, /data-video-url="([^"]+)"/gi),
     ...collectAllMatches(
       html,
       /<a[^>]*href="([^"]*(?:youtube\.com|youtu\.be)[^"]*)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<a[^>]*href="([^"]*web\.archive\.org\/web\/[^"]*(?:youtube\.com|youtu\.be)[^"]*)"/gi,
+    ),
+    ...collectAllMatches(
+      html,
+      /<(?:object|param|embed)[^>]*(?:data|value|src)="([^"]*(?:youtube\.com|youtu\.be)[^"]*)"/gi,
     ),
   ]) {
     const normalized = normalizeYoutubeUrl(decodeAttribute(candidate));
@@ -619,6 +883,10 @@ function extractDetailMedia(html) {
       trailerUrl = normalized;
       break;
     }
+  }
+
+  if (!trailerImage && trailerUrl) {
+    trailerImage = buildYoutubeThumbnailUrl(trailerUrl);
   }
 
   return {
@@ -696,11 +964,25 @@ function normalizePrice(metaValue, textValue) {
     return "FREE";
   }
 
+  const compact = raw
+    .replace(/\b(?:buy|install|download|open|update)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const usdMatch = compact.match(/\$\s*([\d.,]+)/);
+  if (usdMatch?.[1]) return `USD ${usdMatch[1]}`;
+
+  const eurMatch = compact.match(/(?:€|в‚¬)\s*([\d.,]+)/i);
+  if (eurMatch?.[1]) return `EUR ${eurMatch[1]}`;
+
+  const gbpMatch = compact.match(/(?:£|ВЈ)\s*([\d.,]+)/i);
+  if (gbpMatch?.[1]) return `GBP ${gbpMatch[1]}`;
+
   if (raw.startsWith("$")) return `USD ${raw.slice(1).trim()}`;
   if (raw.startsWith("€")) return `EUR ${raw.slice(1).trim()}`;
   if (raw.startsWith("£")) return `GBP ${raw.slice(1).trim()}`;
 
-  return raw;
+  return compact;
 }
 
 function normalizeCategorySlug(slug, label = "") {
@@ -759,7 +1041,23 @@ function normalizeDescriptionBlocks(value) {
 }
 
 function parseNumber(value) {
-  const digits = cleanText(value).replace(/[^\d]/g, "");
+  const source = cleanText(value);
+  if (!source) return 0;
+
+  const compact = source.match(/([\d.,\s\u00a0]+)\s*([kKmM])/);
+  if (compact) {
+    const normalized = compact[1]
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, "")
+      .replace(",", ".");
+    const base = Number.parseFloat(normalized);
+    if (Number.isFinite(base)) {
+      const factor = compact[2].toLowerCase() === "m" ? 1_000_000 : 1_000;
+      return Math.round(base * factor);
+    }
+  }
+
+  const digits = source.replace(/[^\d]/g, "");
   if (!digits) return 0;
   return Number.parseInt(digits, 10);
 }
@@ -785,40 +1083,48 @@ function normalizeMetadataLabel(value) {
 
 function classifyMetadataLabel(label) {
   const text = normalizeMetadataLabel(label);
+  if (text.includes("paivitetty")) return "updated";
+  if (text.includes("päivitetty")) return "updated";
+  if (text.includes("koko")) return "size";
+  if (text.includes("asennukset")) return "installs";
+  if (text.includes("nykyinen versio")) return "version";
+  if (text.includes("vaatii android-version")) return "requiresAndroid";
+  if (text.includes("sisallon ikarajoitus")) return "contentRating";
+  if (text.includes("sisällön ikärajoitus")) return "contentRating";
 
   if (
-    /\b(updated|mise a jour|aktualizacja|actualizado|atualizado|miseajour)\b/.test(
+    /\b(updated|mise a jour|aktualizacja|actualizado|atualizado|miseajour|обновлено)\b/.test(
       text,
     )
   ) {
     return "updated";
   }
-  if (/\b(size|taille|rozmiar|tamano|tamanho|dimensione)\b/.test(text)) {
+  if (/\b(size|taille|rozmiar|tamano|tamanho|dimensione|размер)\b/.test(text)) {
     return "size";
   }
   if (
-    /\b(install|installs|instalacje|installations|instalaciones|installs)\b/.test(
+    /\b(install|installs|instalacje|installations|instalaciones|installs|количество установок)\b/.test(
       text,
     )
   ) {
     return "installs";
   }
   if (
-    /\b(current version|version actuelle|wersja biezaca|version actual|versao atual|versione corrente)\b/.test(
+    /\b(current version|version actuelle|wersja biezaca|version actual|versao atual|versione corrente|текущая версия)\b/.test(
       text,
     )
   ) {
     return "version";
   }
   if (
-    /\b(requires android|wymaga androida|necessite android|requiere android|necessita android)\b/.test(
+    /\b(requires android|wymaga androida|necessite android|requiere android|necessita android|требуемая версия android)\b/.test(
       text,
     )
   ) {
     return "requiresAndroid";
   }
   if (
-    /\b(content rating|classification du contenu|ocena tresci|clasificacion del contenido|classificacao do conteudo)\b/.test(
+    /\b(content rating|classification du contenu|ocena tresci|clasificacion del contenido|classificacao do conteudo|возрастные ограничения)\b/.test(
       text,
     )
   ) {
@@ -841,6 +1147,22 @@ function extractMetadataMap(html) {
   const modernRe =
     /<div class="meta-info">[\s\S]*?<div class="title">([\s\S]*?)<\/div>\s*<div class="content[^"]*"[^>]*>([\s\S]*?)<\/div>[\s\S]*?<\/div>/gi;
   for (const match of html.matchAll(modernRe)) {
+    const key = classifyMetadataLabel(match[1]);
+    if (!key || metadata.has(key)) continue;
+    metadata.set(key, match[2]);
+  }
+
+  const newLayoutRe =
+    /<div[^>]*class="[^"]*\bhAyfc\b[^"]*"[^>]*>[\s\S]*?<div[^>]*class="[^"]*\bBgcNfc\b[^"]*"[^>]*>([\s\S]*?)<\/div>[\s\S]*?<span[^>]*class="[^"]*\bhtlgb\b[^"]*"[^>]*>([\s\S]*?)<\/span>[\s\S]*?<\/div>/gi;
+  for (const match of html.matchAll(newLayoutRe)) {
+    const key = classifyMetadataLabel(match[1]);
+    if (!key || metadata.has(key)) continue;
+    metadata.set(key, match[2]);
+  }
+
+  const modernPairRe =
+    /<div[^>]*class="[^"]*\blXlx5\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<div[^>]*class="[^"]*\bxg1aie\b[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
+  for (const match of html.matchAll(modernPairRe)) {
     const key = classifyMetadataLabel(match[1]);
     if (!key || metadata.has(key)) continue;
     metadata.set(key, match[2]);
@@ -891,45 +1213,77 @@ function extractDetailFields(html, detailTimestamp) {
   const media = extractDetailMedia(html);
   const name = cleanText(
     firstMatch(html, [
-      /<div class="document-title"[^>]*itemprop="name"[^>]*>\s*<div>([\s\S]*?)<\/div>/i,
+      /<span[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/span>/i,
+      /<h1[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/h1>/i,
+      /<h1[^>]*itemprop="name"[^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
+      /<h1[^>]*itemprop="name"[^>]*>\s*<div[^>]*>([\s\S]*?)<\/div>/i,
+      /<h1[^>]*class="[^"]*\bdocument-title\b[^"]*"[^>]*>\s*<div[^>]*>([\s\S]*?)<\/div>/i,
+      /<div class="document-title"[^>]*itemprop="name"[^>]*>\s*<div[^>]*>([\s\S]*?)<\/div>/i,
+      /<div class="document-title"[^>]*>\s*<div[^>]*>([\s\S]*?)<\/div>/i,
       /<span itemprop="name" content="([^"]+)"/i,
       /<meta itemprop="name" content="([^"]+)"/i,
     ]),
   );
   const publisher = cleanText(
     firstMatch(html, [
+      /<a[^>]*href="[^"]*\/store\/apps\/dev(?:eloper)?\?id=[^"]*"[^>]*>([\s\S]*?)<\/a>/i,
       /class="document-subtitle primary"[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/a>/i,
+      /class="document-subtitle primary"[^>]*>\s*<span[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/span>/i,
+      /itemprop="author"[\s\S]*?<span[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/span>/i,
       /itemprop="author"[\s\S]*?<span itemprop="name" content="([^"]+)"/i,
       /itemprop="author"[\s\S]*?<a[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/a>/i,
     ]),
   );
-  const icon = normalizeArchiveMediaUrl(
+  const icon = sanitizeMediaUrl(
     decodeAttribute(
       firstMatch(html, [
-        /<img class="cover-image"[^>]*src="([^"]+)"/i,
+        /<div[^>]*class="[^"]*\bdoc-banner-icon\b[^"]*"[\s\S]*?<img[^>]*src="([^"]+)"/i,
+        /<div[^>]*class="[^"]*\bcover-container\b[^"]*"[\s\S]*?<img[^>]*class="[^"]*\bcover-image\b[^"]*"[^>]*src="([^"]+)"/i,
+        /<img[^>]*class="[^"]*\bcover-image\b[^"]*"[^>]*src="([^"]+)"/i,
         /itemprop="image" content="([^"]+)"/i,
+        /content="([^"]+)"[^>]*itemprop="image"/i,
         /itemprop="image"[^>]*src="([^"]+)"/i,
+        /<img[^>]*src="([^"]+)"[^>]*itemprop="image"/i,
       ]),
     ),
   );
   const descriptionHtml = firstMatch(html, [
+    /<div[^>]*class="[^"]*\bbARER\b[^"]*"[^>]*data-g-id="description"[^>]*>([\s\S]*?)<\/div>/i,
+    /<div[^>]*class="[^"]*\b(?:app-orig-desc|id-app-orig-desc)\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
     /<div id="doc-original-text"[^>]*itemprop="description"[^>]*>([\s\S]*?)<\/div>/i,
     /<div[^>]*itemprop="description"[^>]*>([\s\S]*?)<\/div>/i,
+    /<meta[^>]*itemprop="description"[^>]*content="([^"]+)"/i,
+    /<meta[^>]*content="([^"]+)"[^>]*itemprop="description"/i,
   ]);
   const ratingValueRaw = cleanText(
     firstMatch(html, [
       /itemprop="ratingValue" content="([^"]+)"/i,
+      /content="([^"]+)"[^>]*itemprop="ratingValue"/i,
+      /<div[^>]*class="[^"]*\baverage-rating-value\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+      /<div[^>]*class="[^"]*\bTT9eCd\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+      /<div[^>]*class="[^"]*\bjILTFe\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+      /<div[^>]*class="[^"]*\bBHMmbe\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
       /<div class="score">([\s\S]*?)<\/div>/i,
     ]),
   );
   const ratingCountRaw = cleanText(
     firstMatch(html, [
       /itemprop="ratingCount" content="([^"]+)"/i,
+      /content="([^"]+)"[^>]*itemprop="ratingCount"/i,
+      /<div[^>]*class="[^"]*\bvotes\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+      /aria-label="([\d\s.,\u00a0]+)\s*reviews\s*"/i,
+      /aria-label="([\d\s.,\u00a0]+)\s*(?:ratings|arviota)"/i,
+      /<div[^>]*class="[^"]*\bg1rdde\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+      /<div[^>]*class="[^"]*\bEHUI5b\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+      /<span[^>]*class="[^"]*\bAYi5wd\b[^"]*"[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/i,
       /<span class="reviews-num">([\s\S]*?)<\/span>/i,
     ]),
   );
   const priceMeta = cleanText(
-    firstMatch(html, [/itemprop="price" content="([^"]*)"/i]),
+    firstMatch(html, [
+      /itemprop="price" content="([^"]*)"/i,
+      /content="([^"]*)"[^>]*itemprop="price"/i,
+    ]),
   );
   const priceText = cleanText(
     firstMatch(html, [
@@ -937,7 +1291,29 @@ function extractDetailFields(html, detailTimestamp) {
       /<span class="buy-button-price">([\s\S]*?)<\/span>/i,
     ]),
   );
+  const whatsNew = [];
+  for (const match of html.matchAll(
+    /<div[^>]*class="[^"]*\brecent-change\b[^"]*"[^>]*>([\s\S]*?)<\/div>/gi,
+  )) {
+    const text = match[1]?.trim();
+    if (text) whatsNew.push(text);
+  }
+  if (whatsNew.length === 0) {
+    const whatsNewSection = firstMatch(html, [
+      /<h2[^>]*>\s*What's New\s*<\/h2>[\s\S]*?<div[^>]*itemprop="description"[^>]*>([\s\S]*?)<\/div>/i,
+      /<h2[^>]*>\s*Что нового\s*<\/h2>[\s\S]*?<div[^>]*itemprop="description"[^>]*>([\s\S]*?)<\/div>/i,
+    ]);
+    if (whatsNewSection) {
+      whatsNew.push(whatsNewSection);
+    }
+  }
   const updatedRaw = metadata.get("updated") ?? "";
+  const installsRaw =
+    metadata.get("installs") ??
+    firstMatch(html, [
+      /<div[^>]*class="[^"]*\bClM7O\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<div[^>]*class="[^"]*\bg1rdde\b[^"]*"[^>]*>\s*Downloads\s*<\/div>/i,
+      /<div[^>]*class="[^"]*\bg1rdde\b[^"]*"[^>]*>\s*Downloads\s*<\/div>[\s\S]*?<div[^>]*class="[^"]*\bClM7O\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    ]);
   const updatedAt = parseLocalizedDateToIso(updatedRaw, detailTimestamp);
   const reviews = parseNumber(ratingCountRaw);
   const ratingValue = Number.parseFloat(ratingValueRaw.replace(",", "."));
@@ -947,22 +1323,70 @@ function extractDetailFields(html, detailTimestamp) {
     publisher,
     icon,
     image: icon,
-    trailerImage: media.trailerImage || undefined,
+    trailerImage: sanitizeMediaUrl(media.trailerImage) || undefined,
     trailerUrl: media.trailerUrl,
-    screenshots: media.screenshots,
+    screenshots: sanitizeMediaList(media.screenshots),
     category: extractCategory(html),
     price: normalizePrice(priceMeta, priceText),
     updatedAt,
     size: cleanText(metadata.get("size")),
-    installs: normalizeInstalls(metadata.get("installs")),
+    installs: normalizeInstalls(installsRaw),
     version: cleanText(metadata.get("version")),
     requiresAndroid: cleanText(metadata.get("requiresAndroid")),
-    contentRating: cleanText(metadata.get("contentRating")),
+    contentRating:
+      cleanText(metadata.get("contentRating")) ||
+      cleanText(
+        firstMatch(html, [
+          /itemprop="contentRating"[^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
+          /itemprop="contentRating"[^>]*>([\s\S]*?)<\/span>/i,
+        ]),
+      ),
     description: normalizeDescriptionBlocks(descriptionHtml),
+    whatsNew: normalizeDescriptionBlocks(whatsNew.join("\n")),
     ratingValue: Number.isFinite(ratingValue) ? ratingValue : undefined,
     reviews,
     ratingCountText: formatCountText(reviews),
   };
+}
+
+function isArchiveNotFoundPage(html) {
+  const source = String(html ?? "");
+  if (!source) return false;
+  return (
+    /<title>\s*Not Found\s*<\/title>/i.test(source) &&
+    /requested URL was not found on this server/i.test(source)
+  );
+}
+
+const ARCHIVE_NOT_FOUND_MARKER = "[archive-not-found]";
+
+function shouldPersistMissingApp(details) {
+  const source = String(details ?? "").toLowerCase();
+  if (!source) return false;
+  if (
+    source.includes("timeout:") ||
+    source.includes("429") ||
+    source.includes("rate limit") ||
+    source.includes("econn") ||
+    source.includes("fetch failed") ||
+    source.includes("socket") ||
+    source.includes("network")
+  ) {
+    return false;
+  }
+
+  const segments = source
+    .split("|")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (segments.length === 0) return false;
+
+  return segments.every(
+    (segment) =>
+      segment.includes("no archived details page found") ||
+      segment.includes("archive-not-found") ||
+      segment.includes(ARCHIVE_NOT_FOUND_MARKER.toLowerCase()),
+  );
 }
 
 function buildAppRecord(packageId, detail, detailTimestamp) {
@@ -972,6 +1396,11 @@ function buildAppRecord(packageId, detail, detailTimestamp) {
 
   const subtitleDate =
     detail.updatedAt || toIsoDateFromTimestamp(detailTimestamp);
+
+  const icon = sanitizeMediaUrl(detail.icon);
+  const image = sanitizeMediaUrl(detail.image || detail.icon);
+  const trailerImage = sanitizeMediaUrl(detail.trailerImage) || undefined;
+  const screenshots = sanitizeMediaList(detail.screenshots);
 
   return {
     id: packageId,
@@ -983,11 +1412,11 @@ function buildAppRecord(packageId, detail, detailTimestamp) {
     category: detail.category,
     price: detail.price || "FREE",
     color: hashToColor(packageId),
-    icon: detail.icon,
-    image: detail.image,
-    trailerImage: detail.trailerImage,
+    icon,
+    image,
+    trailerImage,
     trailerUrl: detail.trailerUrl,
-    screenshots: detail.screenshots,
+    screenshots,
     updatedAt: detail.updatedAt,
     size: detail.size,
     installs: detail.installs,
@@ -995,6 +1424,9 @@ function buildAppRecord(packageId, detail, detailTimestamp) {
     requiresAndroid: detail.requiresAndroid,
     contentRating: detail.contentRating,
     description: detail.description,
+    whatsNew: Array.isArray(detail.whatsNew)
+      ? detail.whatsNew.filter(Boolean)
+      : undefined,
     ratingValue: detail.ratingValue,
     ratingCountText: detail.ratingCountText,
     reviews: detail.reviews,
@@ -1153,6 +1585,64 @@ async function fetchBinary(url, label, kind) {
   };
 }
 
+function isImageContentType(contentType) {
+  return /^image\//i.test(String(contentType ?? "").trim());
+}
+
+function looksLikeHtmlDocument(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) return false;
+  const sample = new TextDecoder("utf-8", { fatal: false })
+    .decode(bytes.slice(0, Math.min(bytes.length, 512)))
+    .toLowerCase();
+  return (
+    sample.includes("<html") ||
+    sample.includes("<!doctype html") ||
+    sample.includes("<title>error 404") ||
+    sample.includes("that’s an error") ||
+    sample.includes("that's an error")
+  );
+}
+
+function buildIconUrlVariants(iconUrl) {
+  const variants = [];
+  const seen = new Set();
+  const push = (value) => {
+    const normalized = sanitizeMediaUrl(value);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    variants.push(normalized);
+  };
+
+  push(iconUrl);
+
+  try {
+    const parsed = new URL(String(iconUrl ?? ""));
+    const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    const isGoogleImageHost =
+      host.endsWith(".ggpht.com") ||
+      host === "ggpht.com" ||
+      host.endsWith("googleusercontent.com");
+    if (isGoogleImageHost && !/=[a-z0-9_-]+$/i.test(parsed.pathname)) {
+      push(`${parsed.origin}${parsed.pathname}=w124`);
+    }
+  } catch {}
+
+  return variants;
+}
+
+async function fetchValidatedIconBinary(url, label) {
+  const image = await fetchBinary(url, label, "image");
+  if (
+    !isImageContentType(image.contentType) ||
+    looksLikeHtmlDocument(image.bytes)
+  ) {
+    throw new Error(
+      `${label} resolved to non-image content-type=${image.contentType || "<empty>"} finalUrl=${image.finalUrl}`,
+    );
+  }
+  return image;
+}
+
 function buildCdxUrl(url, year, fields = "timestamp,original") {
   return (
     "https://web.archive.org/cdx/search/cdx?" +
@@ -1186,6 +1676,7 @@ function archivePageUrl(url, timestamp) {
 
 function detectExtension(url, contentType) {
   const type = String(contentType).toLowerCase();
+  if (type.includes("image/avif")) return ".avif";
   if (type.includes("image/png")) return ".png";
   if (type.includes("image/webp")) return ".webp";
   if (type.includes("image/gif")) return ".gif";
@@ -1193,15 +1684,26 @@ function detectExtension(url, contentType) {
   if (type.includes("image/jpeg")) return ".jpg";
 
   const pathname = new URL(url).pathname.toLowerCase();
+  if (pathname.endsWith(".avif")) return ".avif";
   if (pathname.endsWith(".png")) return ".png";
   if (pathname.endsWith(".webp")) return ".webp";
   if (pathname.endsWith(".gif")) return ".gif";
   if (pathname.endsWith(".svg")) return ".svg";
+  if (pathname.endsWith(".jpeg")) return ".jpeg";
+  if (pathname.endsWith(".jpg")) return ".jpg";
   return ".jpg";
 }
 
 async function findExistingIconPath(packageId) {
-  for (const extension of [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]) {
+  for (const extension of [
+    ".avif",
+    ".png",
+    ".svg",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+  ]) {
     const filePath = path.join(ICONS_DIR, `${packageId}${extension}`);
     try {
       const fileInfo = await stat(filePath);
@@ -1222,11 +1724,124 @@ async function saveIconIfMissing(packageId, iconUrl, forceIcons) {
     return { status: "skipped", filePath: existingPath };
   }
 
-  const image = await fetchBinary(iconUrl, `icon:${packageId}`, "image");
+  const iconCandidates = buildIconUrlVariants(iconUrl);
+  let image = null;
+  const failures = [];
+
+  for (const candidate of iconCandidates) {
+    try {
+      image = await fetchValidatedIconBinary(candidate, `icon:${packageId}`);
+      break;
+    } catch (error) {
+      failures.push(`direct(${candidate}):${error?.message ?? String(error)}`);
+    }
+  }
+
+  if (!image) {
+    throw new Error(
+      `icon fetch failed for ${packageId}: ${failures.join(" | ")}`,
+    );
+  }
+
   const extension = detectExtension(image.finalUrl, image.contentType);
   const filePath = path.join(ICONS_DIR, `${packageId}${extension}`);
   await writeFile(filePath, image.bytes);
   return { status: "saved", filePath };
+}
+
+async function resolveFirstWorkingImageUrl(
+  candidates,
+  label,
+  validationCache = new Map(),
+) {
+  const seen = new Set();
+  for (const raw of candidates ?? []) {
+    const candidate = sanitizeMediaUrl(raw);
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+
+    let pending = validationCache.get(candidate);
+    if (!pending) {
+      pending = (async () => {
+        const image = await fetchValidatedIconBinary(candidate, label);
+        return sanitizeMediaUrl(image.finalUrl || candidate);
+      })()
+        .catch(() => "")
+        .finally(() => {
+          if (!validationCache.has(candidate)) return;
+        });
+      validationCache.set(candidate, pending);
+    }
+    const resolved = await pending;
+    if (resolved) return resolved;
+  }
+  return "";
+}
+
+async function ensureWorkingDetailMedia(
+  packageId,
+  probeOrder,
+  loadFieldsForTimestamp,
+  detail,
+) {
+  const records = [];
+  for (const timestamp of probeOrder) {
+    const record = await loadFieldsForTimestamp(timestamp);
+    if (record.notFound) continue;
+    records.push(record.fields);
+  }
+
+  const imageValidationCache = new Map();
+
+  const iconCandidates = [
+    detail.icon,
+    detail.image,
+    ...records.flatMap((fields) => [fields.icon, fields.image]),
+  ];
+  const workingIcon = await resolveFirstWorkingImageUrl(
+    iconCandidates,
+    `media:icon:${packageId}`,
+    imageValidationCache,
+  );
+  if (workingIcon) {
+    detail.icon = workingIcon;
+    if (isBlankText(detail.image)) detail.image = workingIcon;
+  } else {
+    detail.icon = "";
+    if (isBlankText(detail.image)) detail.image = "";
+  }
+
+  const trailerImageCandidates = [
+    detail.trailerImage,
+    ...records.map((fields) => fields.trailerImage),
+  ];
+  const workingTrailerImage = await resolveFirstWorkingImageUrl(
+    trailerImageCandidates,
+    `media:trailer-image:${packageId}`,
+    imageValidationCache,
+  );
+  detail.trailerImage = workingTrailerImage || "";
+
+  const screenshotCandidates = [
+    ...(Array.isArray(detail.screenshots) ? detail.screenshots : []),
+    ...records.flatMap((fields) =>
+      Array.isArray(fields.screenshots) ? fields.screenshots : [],
+    ),
+  ];
+  const workingScreenshots = [];
+  const used = new Set();
+  for (const candidate of screenshotCandidates) {
+    const resolved = await resolveFirstWorkingImageUrl(
+      [candidate],
+      `media:screenshot:${packageId}`,
+      imageValidationCache,
+    );
+    if (!resolved || used.has(resolved)) continue;
+    used.add(resolved);
+    workingScreenshots.push(resolved);
+    if (workingScreenshots.length >= 8) break;
+  }
+  detail.screenshots = workingScreenshots;
 }
 
 function chooseNearestTimestamp(rows, preferredTimestamp) {
@@ -1243,6 +1858,126 @@ function chooseNearestTimestamp(rows, preferredTimestamp) {
       leftDelta - rightDelta || left.timestamp.localeCompare(right.timestamp)
     );
   })[0].timestamp;
+}
+
+function chooseNewestTimestamp(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return "";
+  return [...rows].sort((left, right) =>
+    right.timestamp.localeCompare(left.timestamp),
+  )[0].timestamp;
+}
+
+function isBlankText(value) {
+  return !cleanText(value);
+}
+
+function hasMediaGaps(detail) {
+  const screenshots = Array.isArray(detail?.screenshots)
+    ? detail.screenshots
+    : [];
+  return (
+    isBlankText(detail?.icon) ||
+    isBlankText(detail?.image) ||
+    screenshots.length === 0
+  );
+}
+
+function fillMissingMedia(baseDetail, candidateDetail) {
+  if (isBlankText(baseDetail.icon) && !isBlankText(candidateDetail.icon)) {
+    baseDetail.icon = candidateDetail.icon;
+  }
+  if (isBlankText(baseDetail.image) && !isBlankText(candidateDetail.image)) {
+    baseDetail.image = candidateDetail.image;
+  }
+  if (
+    isBlankText(baseDetail.trailerImage) &&
+    !isBlankText(candidateDetail.trailerImage)
+  ) {
+    baseDetail.trailerImage = candidateDetail.trailerImage;
+  }
+  if (
+    isBlankText(baseDetail.trailerUrl) &&
+    !isBlankText(candidateDetail.trailerUrl)
+  ) {
+    baseDetail.trailerUrl = candidateDetail.trailerUrl;
+  }
+
+  const mergedScreenshots = [];
+  const seen = new Set();
+  for (const url of [
+    ...(Array.isArray(baseDetail.screenshots) ? baseDetail.screenshots : []),
+    ...(Array.isArray(candidateDetail.screenshots)
+      ? candidateDetail.screenshots
+      : []),
+  ]) {
+    const normalized = normalizeArchiveMediaUrl(url);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    mergedScreenshots.push(normalized);
+    if (mergedScreenshots.length >= 8) break;
+  }
+  baseDetail.screenshots = mergedScreenshots;
+}
+
+function applyLatestMetrics(baseDetail, latestDetail) {
+  if (!isBlankText(latestDetail.installs)) {
+    baseDetail.installs = latestDetail.installs;
+  }
+  if (
+    !Number.isNaN(latestDetail.ratingValue) &&
+    Number.isFinite(latestDetail.ratingValue)
+  ) {
+    baseDetail.ratingValue = latestDetail.ratingValue;
+  }
+  if (Number.isFinite(latestDetail.reviews) && latestDetail.reviews > 0) {
+    baseDetail.reviews = latestDetail.reviews;
+    baseDetail.ratingCountText = formatCountText(latestDetail.reviews);
+  } else if (!isBlankText(latestDetail.ratingCountText)) {
+    baseDetail.ratingCountText = latestDetail.ratingCountText;
+  }
+}
+
+function buildProbeOrder(
+  rows,
+  preferredTimestamp,
+  maxItems = DEFAULT_DETAIL_PROBE_LIMIT,
+) {
+  const limit = toPositiveInt(maxItems, DEFAULT_DETAIL_PROBE_LIMIT);
+  const nearestRows = [...rows].sort((left, right) => {
+    if (!TIMESTAMP_RE.test(String(preferredTimestamp))) {
+      return right.timestamp.localeCompare(left.timestamp);
+    }
+
+    const preferred = Number.parseInt(preferredTimestamp, 10);
+    const leftDelta = Math.abs(Number.parseInt(left.timestamp, 10) - preferred);
+    const rightDelta = Math.abs(
+      Number.parseInt(right.timestamp, 10) - preferred,
+    );
+    return (
+      leftDelta - rightDelta || left.timestamp.localeCompare(right.timestamp)
+    );
+  });
+  const newestRows = [...rows].sort((left, right) =>
+    right.timestamp.localeCompare(left.timestamp),
+  );
+  const oldestRows = [...rows].sort((left, right) =>
+    left.timestamp.localeCompare(right.timestamp),
+  );
+  const ordered = [];
+  const seen = new Set();
+  const pushTs = (ts) => {
+    if (!ts || seen.has(ts) || ordered.length >= limit) return;
+    seen.add(ts);
+    ordered.push(ts);
+  };
+
+  pushTs(nearestRows[0]?.timestamp ?? "");
+  pushTs(newestRows[0]?.timestamp ?? "");
+  pushTs(oldestRows[0]?.timestamp ?? "");
+
+  for (const row of nearestRows) pushTs(row.timestamp);
+  for (const row of newestRows) pushTs(row.timestamp);
+  return ordered;
 }
 
 async function collectSourcePackages(year, pageLimit) {
@@ -1339,6 +2074,7 @@ async function collectSourcePackagesInRange(years, pageLimit) {
 async function collectSourcePackagesStreaming(
   year,
   pageLimit,
+  snapshotConcurrency,
   onCandidate,
   shouldStop = () => false,
 ) {
@@ -1355,34 +2091,61 @@ async function collectSourcePackagesStreaming(
       `year=${year} source=${sourceUrl} snapshots=${scopedRows.length}/${rows.length}`,
     );
 
-    for (const row of scopedRows) {
+    const rowChunks = splitIntoChunks(
+      scopedRows,
+      Math.max(1, snapshotConcurrency),
+    );
+    for (const chunk of rowChunks) {
       if (shouldStop()) break;
 
-      const page = await fetchText(
-        archivePageUrl(sourceUrl, row.timestamp),
-        `source:${sourceUrl}:${row.timestamp}`,
-        "page",
+      const chunkResults = await Promise.all(
+        chunk.map(async (row) => {
+          try {
+            const page = await fetchText(
+              archivePageUrl(sourceUrl, row.timestamp),
+              `source:${sourceUrl}:${row.timestamp}`,
+              "page",
+            );
+            const finalTimestamp =
+              extractWaybackTimestamp(page.finalUrl) || row.timestamp;
+            const packageIds = extractPagePackageIds(page.text);
+            return {
+              row,
+              finalTimestamp,
+              packageIds,
+            };
+          } catch (error) {
+            logArchiveSync(
+              "discover:page:fail",
+              `year=${year} source=${sourceUrl} timestamp=${row.timestamp} error=${error?.message ?? String(error)}`,
+            );
+            return null;
+          }
+        }),
       );
-      const finalTimestamp =
-        extractWaybackTimestamp(page.finalUrl) || row.timestamp;
-      const packageIds = extractPagePackageIds(page.text);
-      summary.push({
-        sourceUrl,
-        timestamp: finalTimestamp,
-        packages: packageIds.length,
-      });
 
-      for (const packageId of packageIds) {
+      for (const pageResult of chunkResults) {
         if (shouldStop()) break;
-        if (seen.has(packageId)) continue;
-        seen.add(packageId);
-        await onCandidate({
-          packageId,
+        if (!pageResult) continue;
+
+        summary.push({
           sourceUrl,
-          sourceTimestamp: finalTimestamp,
-          firstSeenYear: year,
-          lastSeenYear: year,
+          timestamp: pageResult.finalTimestamp,
+          packages: pageResult.packageIds.length,
         });
+
+        for (const packageId of pageResult.packageIds) {
+          if (shouldStop()) break;
+          if (seen.has(packageId)) continue;
+          seen.add(packageId);
+          await onCandidate({
+            packageId,
+            sourceUrl,
+            sourceTimestamp: pageResult.finalTimestamp,
+            firstSeenYear: year,
+            lastSeenYear: year,
+          });
+        }
       }
     }
   }
@@ -1421,10 +2184,13 @@ async function runCommand(command, args, options) {
 }
 
 function resolveIconYearForCandidate(candidate, options) {
-  if (Number.isInteger(options.iconYear) && options.iconYear >= 2013) {
+  if (
+    Number.isInteger(options.iconYear) &&
+    options.iconYear >= MIN_ARCHIVE_YEAR
+  ) {
     return options.iconYear;
   }
-  return Number(candidate.firstSeenYear) || 2013;
+  return Number(candidate.firstSeenYear) || MIN_ARCHIVE_YEAR;
 }
 
 async function runArchiveIconSync(packageCandidates, options) {
@@ -1443,7 +2209,11 @@ async function runArchiveIconSync(packageCandidates, options) {
   const byYear = new Map();
   for (const candidate of packageCandidates) {
     const year = resolveIconYearForCandidate(candidate, options);
-    if (!Number.isInteger(year) || year < 2013 || year > CURRENT_YEAR) {
+    if (
+      !Number.isInteger(year) ||
+      year < MIN_ARCHIVE_YEAR ||
+      year > CURRENT_YEAR
+    ) {
       console.warn(
         `[archive-sync] icon year skipped for ${candidate.packageId}: invalid year ${year}`,
       );
@@ -1492,18 +2262,6 @@ async function runArchiveIconSync(packageCandidates, options) {
   }
 }
 
-async function mirrorAppsFileToRoot() {
-  const nextText = await readFile(APPS_FILE, "utf8");
-
-  try {
-    await writeFile(ROOT_APPS_FILE, nextText, "utf8");
-  } catch (error) {
-    console.warn(
-      `[archive-sync] root mirror skipped: ${error?.message ?? String(error)}`,
-    );
-  }
-}
-
 function formatItemRef(order, total = 0) {
   return total > 0 ? `${order}/${total}` : String(order);
 }
@@ -1523,7 +2281,10 @@ function createImportSummary(requested = 0) {
 
 function buildFallbackYears(candidate, years) {
   const normalizedYears = years.filter(
-    (year) => Number.isInteger(year) && year >= 2013 && year <= CURRENT_YEAR,
+    (year) =>
+      Number.isInteger(year) &&
+      year >= MIN_ARCHIVE_YEAR &&
+      year <= CURRENT_YEAR,
   );
   if (normalizedYears.length === 0) return [];
 
@@ -1548,7 +2309,6 @@ async function persistArchiveFallbackApp(candidate, detailRecord, year) {
 
   const nextApps = [...loaded.apps, detailRecord.app];
   await writeFile(APPS_FILE, serializeApps(nextApps), "utf8");
-  await mirrorAppsFileToRoot();
 
   return {
     action: "added",
@@ -1572,12 +2332,12 @@ async function importCandidateFromArchiveFallback(
   }
 
   const preferredTimestamp = String(candidate.sourceTimestamp ?? "");
-  const failures = [];
-
   logArchiveSync(
     "fallback:start",
     `item=${itemRef} id=${candidate.packageId} years=${fallbackYears.join(",")} preferredTs=${preferredTimestamp || "<none>"}`,
   );
+
+  const failures = [];
 
   for (const year of fallbackYears) {
     const stepStartedAt = Date.now();
@@ -1587,10 +2347,10 @@ async function importCandidateFromArchiveFallback(
         `item=${itemRef} id=${candidate.packageId} year=${year}`,
       );
 
-      const detailRecord = await fetchDetailRecord(
-        candidate.packageId,
-        preferredTimestamp,
-        year,
+      const detailRecord = await withTimeout(
+        fetchDetailRecord(candidate.packageId, preferredTimestamp, year),
+        DEFAULT_FALLBACK_STEP_TIMEOUT_MS,
+        `fallback:${candidate.packageId}:${year}`,
       );
       const persisted = await persistArchiveFallbackApp(
         candidate,
@@ -1623,16 +2383,19 @@ async function importCandidateFromArchiveFallback(
       };
     } catch (error) {
       const message = error?.message ?? String(error);
+      const reason = message.includes(ARCHIVE_NOT_FOUND_MARKER)
+        ? "archive-not-found"
+        : "fallback-miss";
       failures.push(`${year}:${message}`);
       logArchiveSync(
-        "fallback:miss",
-        `item=${itemRef} id=${candidate.packageId} year=${year} error=${message} elapsedMs=${elapsedMs(stepStartedAt)}`,
+        "fallback:skip",
+        `item=${itemRef} id=${candidate.packageId} year=${year} reason=${reason} error=${message} elapsedMs=${elapsedMs(stepStartedAt)}`,
       );
     }
   }
 
   return {
-    status: "failed",
+    status: "skipped",
     details: failures.join(" | "),
   };
 }
@@ -1706,7 +2469,14 @@ function logImportEvent(candidate, order, total, event) {
   }
 }
 
-async function importSingleCandidate(candidate, order, total, summary, years) {
+async function importSingleCandidate(
+  candidate,
+  order,
+  total,
+  summary,
+  years,
+  missingApps,
+) {
   const itemStartedAt = Date.now();
   const itemRef = formatItemRef(order, total);
 
@@ -1729,6 +2499,15 @@ async function importSingleCandidate(candidate, order, total, summary, years) {
     summary.updated += itemUpdated;
     summary.failed += itemFailed;
     summary.total = Number(result?.total ?? summary.total);
+
+    if (itemAdded > 0 || itemUpdated > 0) {
+      await unmarkMissingApp(
+        candidate.packageId,
+        itemAdded > 0 ? "import-added" : "import-updated",
+        missingApps,
+      );
+    }
+
     let action =
       itemFailed > 0
         ? "failed"
@@ -1752,13 +2531,49 @@ async function importSingleCandidate(candidate, order, total, summary, years) {
         summary.fallbackAdded += 1;
         summary.failed = Math.max(0, summary.failed - itemFailed);
         summary.total = Number(fallback.total ?? summary.total);
+        await unmarkMissingApp(
+          candidate.packageId,
+          "fallback-added",
+          missingApps,
+        );
         action = "fallback-added";
       } else if (fallback.status === "exists") {
         summary.failed = Math.max(0, summary.failed - itemFailed);
         summary.total = Number(fallback.total ?? summary.total);
+        await unmarkMissingApp(
+          candidate.packageId,
+          "fallback-exists",
+          missingApps,
+        );
         action = "fallback-exists";
+      } else if (fallback.status === "skipped") {
+        action = "fallback-skipped";
+        if (shouldPersistMissingApp(fallback.details)) {
+          await markMissingApp(
+            candidate.packageId,
+            `fallback-skipped:${fallback.details ?? "unknown"}`,
+            missingApps,
+          );
+        } else {
+          logArchiveSync(
+            "missing:skip-transient",
+            `id=${candidate.packageId} reason=fallback-skipped:${fallback.details ?? "unknown"}`,
+          );
+        }
       } else {
         summary.fallbackFailed += 1;
+        if (shouldPersistMissingApp(fallback.details)) {
+          await markMissingApp(
+            candidate.packageId,
+            `fallback-failed:${fallback.details ?? "unknown"}`,
+            missingApps,
+          );
+        } else {
+          logArchiveSync(
+            "missing:skip-transient",
+            `id=${candidate.packageId} reason=fallback-failed:${fallback.details ?? "unknown"}`,
+          );
+        }
         logArchiveSync(
           "fallback:failed",
           `item=${itemRef} id=${candidate.packageId} details=${fallback.details ?? "<none>"}`,
@@ -1772,6 +2587,15 @@ async function importSingleCandidate(candidate, order, total, summary, years) {
     );
   } catch (error) {
     summary.crashed += 1;
+    const crashReason = `import-crash:${error?.message ?? String(error)}`;
+    if (shouldPersistMissingApp(crashReason)) {
+      await markMissingApp(candidate.packageId, crashReason, missingApps);
+    } else {
+      logArchiveSync(
+        "missing:skip-transient",
+        `id=${candidate.packageId} reason=${crashReason}`,
+      );
+    }
     logArchiveSync(
       "import:crash",
       `item=${itemRef} id=${candidate.packageId} error=${error?.message ?? String(error)} elapsedMs=${elapsedMs(itemStartedAt)}`,
@@ -1779,7 +2603,7 @@ async function importSingleCandidate(candidate, order, total, summary, years) {
   }
 }
 
-async function importPackagesGradually(candidates, years) {
+async function importPackagesGradually(candidates, years, missingApps) {
   const startedAt = Date.now();
   const summary = createImportSummary(candidates.length);
 
@@ -1790,6 +2614,7 @@ async function importPackagesGradually(candidates, years) {
       candidates.length,
       summary,
       years,
+      missingApps,
     );
   }
 
@@ -1804,7 +2629,9 @@ async function importPackagesGradually(candidates, years) {
 async function fetchDetailRecord(packageId, preferredTimestamp, year) {
   const detailsUrl = `https://play.google.com/store/apps/details?id=${encodeURIComponent(packageId)}`;
   const rows = await fetchCdxRows(detailsUrl, year);
-  const chosenTimestamp = chooseNearestTimestamp(rows, preferredTimestamp);
+  const probeOrder = buildProbeOrder(rows, preferredTimestamp);
+  const chosenTimestamp = probeOrder[0] ?? "";
+  const newestTimestamp = chooseNewestTimestamp(rows);
 
   if (!chosenTimestamp) {
     throw new Error(
@@ -1812,39 +2639,105 @@ async function fetchDetailRecord(packageId, preferredTimestamp, year) {
     );
   }
 
-  const page = await fetchText(
-    archivePageUrl(detailsUrl, chosenTimestamp),
-    `details:${packageId}:${chosenTimestamp}`,
-    "page",
-  );
-  const detailTimestamp =
-    extractWaybackTimestamp(page.finalUrl) || chosenTimestamp;
-  const fields = extractDetailFields(page.text, detailTimestamp);
+  const fieldCache = new Map();
+  const loadFieldsForTimestamp = async (timestamp) => {
+    if (fieldCache.has(timestamp)) return fieldCache.get(timestamp);
+    const page = await fetchText(
+      archivePageUrl(detailsUrl, timestamp),
+      `details:${packageId}:${timestamp}`,
+      "page",
+    );
+    const detailTimestamp = extractWaybackTimestamp(page.finalUrl) || timestamp;
+    const notFound = isArchiveNotFoundPage(page.text);
+    const fields = extractDetailFields(page.text, detailTimestamp);
+    const record = {
+      timestamp: detailTimestamp,
+      pageUrl: page.finalUrl,
+      notFound,
+      fields,
+    };
+    fieldCache.set(timestamp, record);
+    return record;
+  };
+
+  const baseRecord = await loadFieldsForTimestamp(chosenTimestamp);
+  if (baseRecord.notFound) {
+    throw new Error(
+      `${ARCHIVE_NOT_FOUND_MARKER} package=${packageId} ts=${chosenTimestamp}`,
+    );
+  }
+
+  const mergedFields = { ...baseRecord.fields };
+
+  if (newestTimestamp) {
+    const newestRecord = await loadFieldsForTimestamp(newestTimestamp);
+    if (!newestRecord.notFound) {
+      applyLatestMetrics(mergedFields, newestRecord.fields);
+    }
+  }
+
+  if (hasMediaGaps(mergedFields)) {
+    for (const timestamp of probeOrder) {
+      const record = await loadFieldsForTimestamp(timestamp);
+      if (record.notFound) continue;
+      fillMissingMedia(mergedFields, record.fields);
+      if (!hasMediaGaps(mergedFields)) break;
+    }
+  }
+
+  if (isBlankText(mergedFields.image) && !isBlankText(mergedFields.icon)) {
+    mergedFields.image = mergedFields.icon;
+  }
+
+  try {
+    await withTimeout(
+      ensureWorkingDetailMedia(
+        packageId,
+        probeOrder,
+        loadFieldsForTimestamp,
+        mergedFields,
+      ),
+      DEFAULT_MEDIA_VALIDATE_TIMEOUT_MS,
+      `detail-media:${packageId}:${year}`,
+    );
+  } catch (error) {
+    logArchiveSync(
+      "media:skip",
+      `id=${packageId} year=${year} error=${error?.message ?? String(error)}`,
+    );
+  }
+
   return {
-    timestamp: detailTimestamp,
-    pageUrl: page.finalUrl,
-    app: buildAppRecord(packageId, fields, detailTimestamp),
+    timestamp: baseRecord.timestamp,
+    pageUrl: baseRecord.pageUrl,
+    app: buildAppRecord(packageId, mergedFields, baseRecord.timestamp),
   };
 }
 
 async function main() {
   const startedAt = Date.now();
-  const options = parseArgs(process.argv.slice(2));
+  const options = normalizeRequestedYearRange(parseArgs(process.argv.slice(2)));
   options.iconChunkSize = toPositiveInt(
     options.iconChunkSize,
     DEFAULT_ICON_CHUNK_SIZE,
+  );
+  options.snapshotConcurrency = toPositiveInt(
+    options.snapshotConcurrency,
+    DEFAULT_SNAPSHOT_CONCURRENCY,
   );
 
   const years = resolveYearRange(options.fromYear, options.toYear);
 
   const { byId } = await loadAppsFile(APPS_FILE);
   const existingIds = new Set(byId.keys());
+  const missingApps = await loadMissingApps(MISSING_APPS_FILE);
+  await reconcileMissingApps(existingIds, missingApps);
   const selectedCandidates = [];
   const importSummary = createImportSummary(0);
 
   logArchiveSync(
     "start",
-    `years=${years[0]}-${years[years.length - 1]} existing=${existingIds.size} dryRun=${options.dryRun} forceIcons=${options.forceIcons} skipIcons=${options.skipIcons} pageLimit=${options.pageLimit} appLimit=${options.appLimit} iconYear=${options.iconYear} iconChunkSize=${options.iconChunkSize} manualPackages=${options.packages.length}`,
+    `years=${years[0]}-${years[years.length - 1]} existing=${existingIds.size} missing=${missingApps.size} dryRun=${options.dryRun} forceIcons=${options.forceIcons} skipIcons=${options.skipIcons} pageLimit=${options.pageLimit} appLimit=${options.appLimit} iconYear=${options.iconYear} iconChunkSize=${options.iconChunkSize} snapshotConcurrency=${options.snapshotConcurrency} manualPackages=${options.packages.length}`,
   );
 
   if (options.packages.length > 0) {
@@ -1855,6 +2748,12 @@ async function main() {
         selectedCandidates.length >= options.appLimit
       ) {
         break;
+      }
+      if (missingApps.has(candidate.packageId)) {
+        logArchiveSync(
+          "discover:retry-missing",
+          `source=manual id=${candidate.packageId}`,
+        );
       }
       if (existingIds.has(candidate.packageId)) continue;
       existingIds.add(candidate.packageId);
@@ -1869,11 +2768,19 @@ async function main() {
       const yearSummary = await collectSourcePackagesStreaming(
         year,
         options.pageLimit,
+        options.snapshotConcurrency,
         async (candidate) => {
           if (
             options.appLimit > 0 &&
             selectedCandidates.length >= options.appLimit
           ) {
+            return;
+          }
+          if (missingApps.has(candidate.packageId)) {
+            logArchiveSync(
+              "discover:skip-missing",
+              `year=${year} id=${candidate.packageId} source=${candidate.sourceUrl}`,
+            );
             return;
           }
           if (existingIds.has(candidate.packageId)) return;
@@ -1894,6 +2801,7 @@ async function main() {
               0,
               importSummary,
               years,
+              missingApps,
             );
           }
         },
@@ -1946,6 +2854,7 @@ async function main() {
     const manualImportSummary = await importPackagesGradually(
       selectedCandidates,
       years,
+      missingApps,
     );
     importSummary.requested = manualImportSummary.requested;
     importSummary.added = manualImportSummary.added;
@@ -1961,17 +2870,10 @@ async function main() {
       `requested=${importSummary.requested} added=${importSummary.added} fallbackAdded=${importSummary.fallbackAdded} updated=${importSummary.updated} failed=${importSummary.failed} fallbackFailed=${importSummary.fallbackFailed} crashed=${importSummary.crashed} total=${importSummary.total}`,
     );
   }
-
-  await mirrorAppsFileToRoot();
-  const currentApps = await loadAppsFile(APPS_FILE);
-  const importedCandidates = selectedCandidates.filter((candidate) =>
-    currentApps.byId.has(candidate.packageId),
-  );
   logArchiveSync(
-    "icon:selection",
-    `candidates=${selectedCandidates.length} imported=${importedCandidates.length}`,
+    "icon:disabled",
+    "icon file sync disabled: keeping direct media URLs in apps.generated.ts",
   );
-  await runArchiveIconSync(importedCandidates, options);
 
   logArchiveSync(
     "done",

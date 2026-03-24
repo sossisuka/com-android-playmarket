@@ -16,6 +16,25 @@ const REQUEST_TIMEOUT_MS = Number.parseInt(
   process.env.PLAY_REQUEST_TIMEOUT_MS ?? "30000",
   10,
 );
+const REQUEST_GUARD_ENABLED = !/^(0|false|no)$/i.test(
+  process.env.PLAY_REQUEST_GUARD_ENABLED ?? "1",
+);
+const MIN_REQUEST_DELAY_MS = Number.parseInt(
+  process.env.PLAY_MIN_REQUEST_DELAY_MS ?? "300",
+  10,
+);
+const REQUEST_JITTER_MS = Number.parseInt(
+  process.env.PLAY_REQUEST_JITTER_MS ?? "120",
+  10,
+);
+const RETRY_429_COOLDOWN_MS = Number.parseInt(
+  process.env.PLAY_RETRY_429_COOLDOWN_MS ?? "20000",
+  10,
+);
+const RETRY_403_COOLDOWN_MS = Number.parseInt(
+  process.env.PLAY_RETRY_403_COOLDOWN_MS ?? "12000",
+  10,
+);
 const PERSIST_EVERY = Number.parseInt(
   process.env.PLAY_PERSIST_EVERY ?? "25",
   10,
@@ -68,6 +87,10 @@ const defaultReviews = [
     avatar: fallbackReviewAvatar,
   },
 ];
+
+let nextAllowedRequestAt = 0;
+let forcedCooldownUntil = 0;
+let permitQueue = Promise.resolve();
 
 function createStats() {
   return {
@@ -133,6 +156,46 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function randomJitter(maxMs) {
+  if (!Number.isFinite(maxMs) || maxMs <= 0) return 0;
+  return Math.floor(Math.random() * (maxMs + 1));
+}
+
+function pushCooldown(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  const until = Date.now() + ms;
+  if (until > forcedCooldownUntil) forcedCooldownUntil = until;
+}
+
+async function waitForRequestPermit() {
+  if (!REQUEST_GUARD_ENABLED) return;
+
+  let releasePermit;
+  const myTurn = new Promise((resolve) => {
+    releasePermit = resolve;
+  });
+  const previous = permitQueue;
+  permitQueue = permitQueue.then(() => myTurn);
+  await previous;
+
+  try {
+    const now = Date.now();
+    const waitUntil = Math.max(now, nextAllowedRequestAt, forcedCooldownUntil);
+    const waitMs = waitUntil - now;
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+
+    const startedAt = Date.now();
+    nextAllowedRequestAt =
+      startedAt +
+      Math.max(0, MIN_REQUEST_DELAY_MS) +
+      randomJitter(Math.max(0, REQUEST_JITTER_MS));
+  } finally {
+    releasePermit();
+  }
+}
+
 async function withTimeout(promise, timeoutMs, label) {
   return Promise.race([
     promise,
@@ -146,6 +209,7 @@ async function withRetry(taskLabel, fn, statsSection, stats, meta) {
   let attempt = 0;
   while (attempt <= RETRY_COUNT) {
     try {
+      await waitForRequestPermit();
       return await withTimeout(
         fn(),
         REQUEST_TIMEOUT_MS,
@@ -161,12 +225,19 @@ async function withRetry(taskLabel, fn, statsSection, stats, meta) {
       }
 
       statsSection.retries += 1;
+      if (code === "http_429") {
+        pushCooldown(RETRY_429_COOLDOWN_MS);
+      } else if (code === "http_403") {
+        pushCooldown(RETRY_403_COOLDOWN_MS);
+      }
       const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
+      const extendedDelay =
+        delay + randomJitter(Math.floor(RETRY_BASE_DELAY_MS / 2));
       const ctx = meta ? ` ${meta}` : "";
       console.warn(
-        `[retry] ${taskLabel}${ctx} failed (${code}), retry ${attempt + 1}/${RETRY_COUNT} in ${delay}ms`,
+        `[retry] ${taskLabel}${ctx} failed (${code}), retry ${attempt + 1}/${RETRY_COUNT} in ${extendedDelay}ms`,
       );
-      await sleep(delay);
+      await sleep(extendedDelay);
       attempt += 1;
     }
   }
@@ -834,6 +905,11 @@ function printStats(stats) {
           searchEnabled: SEARCH_ENABLED,
           searchSize: SEARCH_SIZE,
           retryCount: RETRY_COUNT,
+          requestGuardEnabled: REQUEST_GUARD_ENABLED,
+          minRequestDelayMs: MIN_REQUEST_DELAY_MS,
+          requestJitterMs: REQUEST_JITTER_MS,
+          retry429CooldownMs: RETRY_429_COOLDOWN_MS,
+          retry403CooldownMs: RETRY_403_COOLDOWN_MS,
         },
         ...stats,
       },

@@ -43,6 +43,18 @@ const USER_AGENT =
   process.env.PLAY_ARCHIVE_USER_AGENT ??
   "play-google-api-archive-icons/1.0 (+local script)";
 
+function emptyAppsModule() {
+  return [
+    'import type { AppData } from "./apps";',
+    "",
+    "// AUTO-GENERATED FILE. DO NOT EDIT BY HAND.",
+    `// Generated at: ${new Date().toISOString()}`,
+    "",
+    `export const ${EXPORT_NAME}: AppData[] = [];`,
+    "",
+  ].join("\n");
+}
+
 function parseArgs(argv) {
   const options = {
     year: DEFAULT_YEAR,
@@ -190,7 +202,15 @@ function findMatchingArrayEnd(text, startIndex) {
 }
 
 async function loadPackageIds(sourcePath) {
-  const source = await readFile(sourcePath, "utf8");
+  await mkdir(path.dirname(sourcePath), { recursive: true });
+  let source = "";
+  try {
+    source = await readFile(sourcePath, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    source = emptyAppsModule();
+    await writeFile(sourcePath, source, "utf8");
+  }
   const apps = parseGeneratedArray(source, EXPORT_NAME);
   const ids = [];
   const seen = new Set();
@@ -357,6 +377,24 @@ async function fetchBinary(url, label, kind) {
   };
 }
 
+function isImageContentType(contentType) {
+  return /^image\//i.test(String(contentType ?? "").trim());
+}
+
+function looksLikeHtmlDocument(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) return false;
+  const sample = new TextDecoder("utf-8", { fatal: false })
+    .decode(bytes.slice(0, Math.min(bytes.length, 512)))
+    .toLowerCase();
+  return (
+    sample.includes("<html") ||
+    sample.includes("<!doctype html") ||
+    sample.includes("<title>error 404") ||
+    sample.includes("that’s an error") ||
+    sample.includes("that's an error")
+  );
+}
+
 async function fetchSnapshotTimestamps(packageId, year) {
   const detailsUrl = `https://play.google.com/store/apps/details?id=${encodeURIComponent(packageId)}`;
   const cdxUrl =
@@ -390,6 +428,23 @@ function chooseSnapshotTimestamp(timestamps, preferredTimestamp = "") {
   })[0];
 }
 
+function buildSnapshotProbeOrder(timestamps, preferredTimestamp = "") {
+  if (!Array.isArray(timestamps) || timestamps.length === 0) return [];
+  const nearest = chooseSnapshotTimestamp(timestamps, preferredTimestamp);
+  const ordered = [];
+  const seen = new Set();
+  const push = (value) => {
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    ordered.push(value);
+  };
+  push(nearest);
+  for (const value of timestamps) {
+    push(value);
+  }
+  return ordered;
+}
+
 function archivePageUrl(packageId, timestamp) {
   const detailsUrl = `https://play.google.com/store/apps/details?id=${encodeURIComponent(packageId)}`;
   return `https://web.archive.org/web/${timestamp}/${detailsUrl}`;
@@ -420,6 +475,13 @@ function extractCoverImageUrl(html) {
   );
   if (itemPropMatch?.[1]) return normalizeArchiveUrl(itemPropMatch[1]);
 
+  const reverseItemPropMatch = html.match(
+    /<img\b[^>]*src="([^"]+)"[^>]*itemprop="image"/i,
+  );
+  if (reverseItemPropMatch?.[1]) {
+    return normalizeArchiveUrl(reverseItemPropMatch[1]);
+  }
+
   return "";
 }
 
@@ -446,6 +508,7 @@ function assertImAsset(url) {
 
 function detectExtension(url, contentType) {
   const type = String(contentType).toLowerCase();
+  if (type.includes("image/avif")) return ".avif";
   if (type.includes("image/png")) return ".png";
   if (type.includes("image/webp")) return ".webp";
   if (type.includes("image/gif")) return ".gif";
@@ -453,15 +516,66 @@ function detectExtension(url, contentType) {
   if (type.includes("image/jpeg")) return ".jpg";
 
   const pathname = new URL(url).pathname.toLowerCase();
+  if (pathname.endsWith(".avif")) return ".avif";
   if (pathname.endsWith(".png")) return ".png";
   if (pathname.endsWith(".webp")) return ".webp";
   if (pathname.endsWith(".gif")) return ".gif";
   if (pathname.endsWith(".svg")) return ".svg";
+  if (pathname.endsWith(".jpeg")) return ".jpeg";
+  if (pathname.endsWith(".jpg")) return ".jpg";
   return ".jpg";
 }
 
+function buildImageUrlVariants(imageUrl) {
+  const variants = [];
+  const seen = new Set();
+  const push = (value) => {
+    const normalized = normalizeArchiveUrl(value);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    variants.push(normalized);
+  };
+
+  push(imageUrl);
+
+  try {
+    const parsed = new URL(String(imageUrl ?? ""));
+    const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    const isGoogleImageHost =
+      host.endsWith(".ggpht.com") ||
+      host === "ggpht.com" ||
+      host.endsWith("googleusercontent.com");
+    if (isGoogleImageHost && !/=[a-z0-9_-]+$/i.test(parsed.pathname)) {
+      push(`${parsed.origin}${parsed.pathname}=w124`);
+    }
+  } catch {}
+
+  return variants;
+}
+
+async function fetchValidatedImageBinary(url, label) {
+  const image = await fetchBinary(url, label, "image");
+  if (
+    !isImageContentType(image.contentType) ||
+    looksLikeHtmlDocument(image.bytes)
+  ) {
+    throw new Error(
+      `${label} resolved to non-image content-type=${image.contentType || "<empty>"} finalUrl=${image.finalUrl}`,
+    );
+  }
+  return image;
+}
+
 async function findExistingIconBase(packageId) {
-  const knownExtensions = [".png", ".jpg", ".webp", ".gif", ".svg"];
+  const knownExtensions = [
+    ".avif",
+    ".png",
+    ".svg",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+  ];
   for (const extension of knownExtensions) {
     const filePath = path.join(ICONS_DIR, `${packageId}${extension}`);
     try {
@@ -481,45 +595,71 @@ async function saveArchiveIcon(packageId, year, preferredTimestamp, force) {
   }
 
   const timestamps = await fetchSnapshotTimestamps(packageId, year);
-  const chosenTimestamp = chooseSnapshotTimestamp(
-    timestamps,
-    preferredTimestamp,
-  );
-  if (!chosenTimestamp) {
+  const probeOrder = buildSnapshotProbeOrder(timestamps, preferredTimestamp);
+  if (probeOrder.length === 0) {
     throw new Error(`no archived page found for ${packageId} in ${year}`);
   }
 
-  const page = await fetchText(
-    archivePageUrl(packageId, chosenTimestamp),
-    `page:${packageId}`,
-    "page",
-  );
-  const pageTimestamp = assertArchiveYear(
-    page.finalUrl,
-    year,
-    `page:${packageId}`,
-  );
-  const imageUrl = extractCoverImageUrl(page.text);
-  if (!imageUrl) {
-    throw new Error(`cover-image not found in archived page for ${packageId}`);
+  const failures = [];
+  for (const chosenTimestamp of probeOrder) {
+    try {
+      const page = await fetchText(
+        archivePageUrl(packageId, chosenTimestamp),
+        `page:${packageId}`,
+        "page",
+      );
+      const pageTimestamp = assertArchiveYear(
+        page.finalUrl,
+        year,
+        `page:${packageId}`,
+      );
+      const imageUrl = extractCoverImageUrl(page.text);
+      if (!imageUrl) {
+        failures.push(`${chosenTimestamp}:cover-image not found`);
+        continue;
+      }
+
+      assertArchiveYear(imageUrl, year, `image:${packageId}`);
+      assertImAsset(imageUrl);
+
+      let image = null;
+      const imageCandidates = buildImageUrlVariants(imageUrl);
+      for (const candidate of imageCandidates) {
+        try {
+          image = await fetchValidatedImageBinary(
+            candidate,
+            `image:${packageId}`,
+          );
+          break;
+        } catch (error) {
+          failures.push(
+            `${chosenTimestamp}:${candidate}:${error?.message ?? String(error)}`,
+          );
+        }
+      }
+
+      if (!image) continue;
+
+      const extension = detectExtension(image.finalUrl, image.contentType);
+      const filePath = path.join(ICONS_DIR, `${packageId}${extension}`);
+      await writeFile(filePath, image.bytes);
+
+      return {
+        status: "saved",
+        packageId,
+        filePath,
+        pageTimestamp,
+        imageTimestamp: extractWaybackTimestamp(imageUrl),
+        imageUrl,
+      };
+    } catch (error) {
+      failures.push(`${chosenTimestamp}:${error?.message ?? String(error)}`);
+    }
   }
 
-  assertArchiveYear(imageUrl, year, `image:${packageId}`);
-  assertImAsset(imageUrl);
-
-  const image = await fetchBinary(imageUrl, `image:${packageId}`, "image");
-  const extension = detectExtension(image.finalUrl, image.contentType);
-  const filePath = path.join(ICONS_DIR, `${packageId}${extension}`);
-  await writeFile(filePath, image.bytes);
-
-  return {
-    status: "saved",
-    packageId,
-    filePath,
-    pageTimestamp,
-    imageTimestamp: extractWaybackTimestamp(imageUrl),
-    imageUrl,
-  };
+  throw new Error(
+    `image download failed for ${packageId}: ${failures.join(" | ")}`,
+  );
 }
 
 function isMissingArchiveError(message) {

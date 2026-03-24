@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "bun --watch src/server.ts",
     "start": "bun src/server.ts",
+    "sync:ui": "bun scripts/sync-google-play-ui.mjs",
     "download:archive-icons": "bun scripts/download-archive-icons.mjs",
     "sync:archive-apps": "bun scripts/sync-archive-apps.mjs"
   },

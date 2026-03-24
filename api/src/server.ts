@@ -1,4 +1,5 @@
 ﻿import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { watch } from "node:fs";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 
@@ -57,6 +58,7 @@ type ReviewsDb = {
 
 type Cache = {
   mtimeMs: number;
+  size: number;
   apps: RawApp[];
   byId: Map<string, RawApp>;
   summaries: SummaryApp[];
@@ -118,11 +120,28 @@ const UNSUPPORTED_APPS_FILE = path.join(
 );
 const ICONS_DIR = path.resolve(import.meta.dir, "./data/icons");
 const APK_DIR = path.resolve(import.meta.dir, "./data/apk");
+const MEDIA_PROXY_ENABLED =
+  (process.env.MEDIA_PROXY_ENABLED ?? "1").trim() !== "0";
+const MEDIA_PROXY_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.MEDIA_PROXY_TIMEOUT_MS ?? "15000") || 15000,
+);
 const APPS_PAGE_SIZE = 20;
 const PACKAGE_ID_RE = /^[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)+$/;
+const REALTIME_CACHE_SYNC_ENABLED =
+  (process.env.REALTIME_CACHE_SYNC_ENABLED ?? "1").trim() !== "0";
+const ALLOWED_MEDIA_HOST_SUFFIXES = [
+  "googleusercontent.com",
+  "ggpht.com",
+  "ytimg.com",
+  "gstatic.com",
+  "googlevideo.com",
+];
 
 let localIconIndexCache: Map<string, string> | null = null;
 let localIconIndexPromise: Promise<Map<string, string>> | null = null;
+let appsFileWatcherStarted = false;
+let appsReloadTimer: ReturnType<typeof setTimeout> | null = null;
 
 const HISTORICAL_HOME_BANNERS: HomeBannerSeed[] = [
   {
@@ -733,7 +752,10 @@ function pickSummary(app: RawApp): SummaryApp {
     price: String(app.price ?? ""),
     installs: String(app.installs ?? ""),
     color: String(app.color ?? ""),
-    icon: String(app.icon ?? ""),
+    icon: pickRemoteIconFallback(
+      String(app.icon ?? ""),
+      String(app.image ?? ""),
+    ),
     trailerImage: String(app.trailerImage ?? ""),
     trailerUrl: String(app.trailerUrl ?? ""),
     reviews: Number(app.reviews ?? 0),
@@ -753,7 +775,13 @@ async function getLocalIconIndex(): Promise<Map<string, string>> {
       for (const entry of entries) {
         if (!entry.isFile()) continue;
         const ext = path.extname(entry.name).toLowerCase();
-        if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) continue;
+        if (
+          ![".avif", ".png", ".svg", ".jpg", ".jpeg", ".webp", ".gif"].includes(
+            ext,
+          )
+        ) {
+          continue;
+        }
         next.set(path.basename(entry.name, ext), entry.name);
       }
     } catch (error) {
@@ -788,13 +816,53 @@ function resolvedIconUrl(
 }
 
 function pickRemoteIconFallback(primary: string, secondary = ""): string {
-  const first = primary.trim();
+  const normalizeRemoteUrl = (value: string): string => {
+    const raw = value.trim();
+    if (!raw) return "";
+    if (raw.startsWith("//")) return `https:${raw}`;
+    if (/^http:\/\//i.test(raw))
+      return `https://${raw.slice("http://".length)}`;
+    return raw;
+  };
+
+  const first = normalizeRemoteUrl(primary);
   if (/^https?:\/\//i.test(first)) return first;
 
-  const second = secondary.trim();
+  const second = normalizeRemoteUrl(secondary);
   if (/^https?:\/\//i.test(second)) return second;
 
   return first || second;
+}
+
+function isAllowedMediaHost(hostname: string): boolean {
+  const host = hostname.replace(/^www\./, "").toLowerCase();
+  if (host === "web.archive.org") return true;
+  return ALLOWED_MEDIA_HOST_SUFFIXES.some(
+    (suffix) => host === suffix || host.endsWith(`.${suffix}`),
+  );
+}
+
+function toClientMediaUrl(req: Request, input: string): string {
+  const normalized = pickRemoteIconFallback(input);
+  if (!normalized) return "";
+
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    return normalized;
+  }
+
+  if (!/^https?:$/i.test(parsed.protocol)) return normalized;
+  if (!isAllowedMediaHost(parsed.hostname)) return normalized;
+  if (!MEDIA_PROXY_ENABLED) return normalized;
+  const requestProtocol = new URL(req.url).protocol.toLowerCase();
+  if (requestProtocol !== "https:") return normalized;
+
+  return absoluteUrl(
+    req,
+    `/media?url=${encodeURIComponent(parsed.toString())}`,
+  );
 }
 
 function withResolvedSummaryIcon(
@@ -802,14 +870,10 @@ function withResolvedSummaryIcon(
   iconIndex: Map<string, string>,
   app: SummaryApp,
 ): SummaryApp {
+  const fallback = toClientMediaUrl(req, pickRemoteIconFallback(app.icon));
   return {
     ...app,
-    icon: resolvedIconUrl(
-      req,
-      iconIndex,
-      app.id,
-      pickRemoteIconFallback(app.icon),
-    ),
+    icon: resolvedIconUrl(req, iconIndex, app.id, fallback),
   };
 }
 
@@ -820,14 +884,21 @@ function withResolvedRawIcon(
 ): RawApp {
   const id = String(app.id ?? "").trim();
   if (!id) return app;
+  const fallback = toClientMediaUrl(
+    req,
+    pickRemoteIconFallback(String(app.icon ?? ""), String(app.image ?? "")),
+  );
+  const resolvedIcon = resolvedIconUrl(req, iconIndex, id, fallback);
+  const screenshots = toStringArray(app.screenshots).map((item) =>
+    toClientMediaUrl(req, item),
+  );
+
   return {
     ...app,
-    icon: resolvedIconUrl(
-      req,
-      iconIndex,
-      id,
-      pickRemoteIconFallback(String(app.icon ?? ""), String(app.image ?? "")),
-    ),
+    icon: resolvedIcon,
+    image: toClientMediaUrl(req, String(app.image ?? "")) || resolvedIcon,
+    trailerImage: toClientMediaUrl(req, String(app.trailerImage ?? "")),
+    screenshots,
   };
 }
 
@@ -909,7 +980,13 @@ function parseAppsArray(fileText: string): RawApp[] {
 
 async function ensureCache(): Promise<Cache> {
   const fileStat = await stat(APPS_FILE);
-  if (cache && cache.mtimeMs === fileStat.mtimeMs) return cache;
+  if (
+    cache &&
+    cache.mtimeMs === fileStat.mtimeMs &&
+    cache.size === fileStat.size
+  ) {
+    return cache;
+  }
   if (cacheLoadPromise) return cacheLoadPromise;
 
   cacheLoadPromise = (async () => {
@@ -931,6 +1008,7 @@ async function ensureCache(): Promise<Cache> {
 
     const nextCache: Cache = {
       mtimeMs: fileStat.mtimeMs,
+      size: fileStat.size,
       apps,
       byId,
       summaries,
@@ -953,6 +1031,48 @@ async function ensureCache(): Promise<Cache> {
     return await cacheLoadPromise;
   } finally {
     cacheLoadPromise = null;
+  }
+}
+
+function invalidateAppsCache(reason: string): void {
+  cache = null;
+  cacheLoadPromise = null;
+  logInfo(`cache invalidated reason=${reason}`);
+}
+
+function scheduleAppsCacheReload(reason: string): void {
+  if (appsReloadTimer) clearTimeout(appsReloadTimer);
+  appsReloadTimer = setTimeout(async () => {
+    appsReloadTimer = null;
+    invalidateAppsCache(reason);
+    try {
+      await ensureCache();
+      logInfo(`cache realtime sync done reason=${reason}`);
+    } catch (error) {
+      logInfo(
+        `cache realtime sync failed reason=${reason} error=${String(error)}`,
+      );
+    }
+  }, 200);
+}
+
+function startRealtimeCacheSync(): void {
+  if (!REALTIME_CACHE_SYNC_ENABLED || appsFileWatcherStarted) return;
+  appsFileWatcherStarted = true;
+
+  const watchDir = path.dirname(APPS_FILE);
+  const watchFile = path.basename(APPS_FILE);
+
+  try {
+    watch(watchDir, (eventType, fileName) => {
+      if (!fileName) return;
+      if (String(fileName) !== watchFile) return;
+      scheduleAppsCacheReload(`fs.watch:${eventType}`);
+    });
+    logInfo(`realtime cache sync enabled source=${APPS_FILE}`);
+  } catch (error) {
+    appsFileWatcherStarted = false;
+    logInfo(`realtime cache sync disabled error=${String(error)}`);
   }
 }
 function okJson(data: unknown, init: ResponseInit = {}): Response {
@@ -1505,6 +1625,41 @@ Bun.serve({
       logRequestEnd(req, 200, startedAt, `id=${id}`);
       return response;
     },
+    "/app": async (req) => {
+      const startedAt = logRequestStart(req);
+      const c = await ensureCache();
+      const iconIndex = await getLocalIconIndex();
+      const reviewsDb = await ensureReviewsDb();
+      const url = new URL(req.url);
+      const id = String(url.searchParams.get("id") ?? "").trim();
+      if (!id) {
+        const response = badRequest("id is required");
+        logRequestEnd(req, 400, startedAt);
+        return response;
+      }
+
+      const app = c.byId.get(id);
+      if (!app) {
+        const response = okJson({ error: "not found" }, { status: 404 });
+        logRequestEnd(req, 404, startedAt, `id=${id}`);
+        return response;
+      }
+
+      const packageReviews = reviewsForPackage(reviewsDb, id);
+      const detailedApp =
+        packageReviews.length > 0
+          ? applyReviewSummaryToRawApp(app, buildReviewSummary(packageReviews))
+          : app;
+      const response = okJson({
+        app: withResolvedRawIcon(
+          req,
+          iconIndex,
+          normalizeAppDetails(detailedApp),
+        ),
+      });
+      logRequestEnd(req, 200, startedAt, `id=${id}`);
+      return response;
+    },
     "/reviews/:appId": async (req) => {
       const startedAt = logRequestStart(req);
       const c = await ensureCache();
@@ -1954,6 +2109,99 @@ Bun.serve({
       logRequestEnd(req, 200, startedAt, `file=${fileName}`);
       return response;
     },
+    "/media": async (req) => {
+      const startedAt = logRequestStart(req);
+      const url = new URL(req.url);
+      const source = (url.searchParams.get("url") ?? "").trim();
+      if (!source) {
+        const response = badRequest("url is required");
+        logRequestEnd(req, 400, startedAt);
+        return response;
+      }
+
+      let target: URL;
+      try {
+        target = new URL(source);
+      } catch {
+        const response = badRequest("url is invalid");
+        logRequestEnd(req, 400, startedAt);
+        return response;
+      }
+
+      if (
+        !/^https?:$/i.test(target.protocol) ||
+        !isAllowedMediaHost(target.hostname)
+      ) {
+        const response = badRequest("url host is not allowed");
+        logRequestEnd(req, 400, startedAt, `host=${target.hostname}`);
+        return response;
+      }
+
+      const timeout = Number(
+        url.searchParams.get("timeoutMs") ?? String(MEDIA_PROXY_TIMEOUT_MS),
+      );
+      const controller = new AbortController();
+      const timeoutId = setTimeout(
+        () => controller.abort(),
+        Math.max(1000, timeout || MEDIA_PROXY_TIMEOUT_MS),
+      );
+
+      try {
+        const upstream = await fetch(target.toString(), {
+          headers: {
+            "user-agent": "play-google-api-media-proxy/1.0",
+            accept: "image/*,*/*;q=0.8",
+          },
+          redirect: "follow",
+          signal: controller.signal,
+        });
+
+        if (!upstream.ok) {
+          const response = okJson(
+            { error: `upstream failed with ${upstream.status}` },
+            { status: 502 },
+          );
+          logRequestEnd(
+            req,
+            502,
+            startedAt,
+            `host=${target.hostname} upstreamStatus=${upstream.status}`,
+          );
+          return response;
+        }
+
+        const contentType =
+          upstream.headers.get("content-type") ?? "application/octet-stream";
+        const cacheControl =
+          upstream.headers.get("cache-control") ?? "public, max-age=86400";
+
+        const response = new Response(upstream.body, {
+          status: 200,
+          headers: {
+            "content-type": contentType,
+            "cache-control": cacheControl,
+            "access-control-allow-origin": "*",
+          },
+        });
+        logRequestEnd(req, 200, startedAt, `host=${target.hostname}`);
+        return response;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const response = okJson(
+          { error: `media fetch failed: ${message}` },
+          { status: 502 },
+        );
+        logRequestEnd(
+          req,
+          502,
+          startedAt,
+          `host=${target.hostname} error=${message}`,
+        );
+        return response;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    },
     "/apk/:packageId": async (req) => {
       const startedAt = logRequestStart(req);
       const url = new URL(req.url);
@@ -2007,6 +2255,7 @@ Bun.serve({
 
 logInfo(`started on http://${HOST}:${PORT}`);
 logInfo(`source: ${APPS_FILE}`);
+startRealtimeCacheSync();
 
 void ensureCache()
   .then(() => logInfo("cache warmup complete"))
