@@ -311,10 +311,27 @@ function formatInstalls(min, max) {
 
 function formatPrice(app) {
   if (app.free || Number(app.price) === 0) return "FREE";
-  const currency = app.currency ? `${app.currency} ` : "$";
   const numeric = Number(app.price);
-  if (Number.isNaN(numeric)) return `${currency}${app.price}`;
-  return `${currency}${numeric.toFixed(2)}`;
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return `USD ${numeric
+      .toFixed(2)
+      .replace(/\.00$/, "")
+      .replace(/(\.\d)0$/, "$1")}`;
+  }
+
+  const raw = String(app.price ?? "").trim();
+  const amount = raw.match(/(\d[\d.,\s\u00a0]*)/)?.[1] ?? "";
+  if (!amount) return "USD";
+  const normalized = amount
+    .replace(/\u00a0/g, "")
+    .replace(/\s+/g, "")
+    .replace(",", ".");
+  const parsed = Number.parseFloat(normalized);
+  if (!Number.isFinite(parsed) || parsed <= 0) return "USD";
+  return `USD ${parsed
+    .toFixed(2)
+    .replace(/\.00$/, "")
+    .replace(/(\.\d)0$/, "$1")}`;
 }
 
 function normalizeYoutubeUrl(rawUrl) {

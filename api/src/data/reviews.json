@@ -103,6 +103,19 @@
       "updatedAt": "2014-02-06T21:06:00.000Z",
       "appVersion": "4.1.0",
       "deviceLabel": "Moto G"
+    },
+    {
+      "id": "79ed52604ce78ecb26f4",
+      "packageId": "com.imo.android.imoim",
+      "userId": "f3a8fd84fc0dc1f06bbdf75a",
+      "authorName": "эдуард прилуцкий",
+      "title": "I want killen",
+      "text": "Ban",
+      "rating": 4,
+      "createdAt": "2026-03-24T17:39:49.432Z",
+      "updatedAt": "2026-03-24T17:39:49.432Z",
+      "appVersion": "2026.01.1031",
+      "deviceLabel": "Pixel Tablet"
     }
   ]
 }

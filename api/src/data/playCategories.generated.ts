@@ -1,12 +1,24 @@
 export type PlayCategory = { id: string; label: string };
 
 // AUTO-GENERATED FILE. DO NOT EDIT BY HAND.
-// Generated at: 2026-03-24T21:01:27.511Z
+// Generated at: 2026-03-25T04:19:51.172Z
 
 export const generatedPlayCategories: PlayCategory[] = [
   {
+    "id": "ART_AND_DESIGN",
+    "label": "Art & Design"
+  },
+  {
+    "id": "AUTO_AND_VEHICLES",
+    "label": "Auto & Vehicles"
+  },
+  {
     "id": "BOOKS_AND_REFERENCE",
     "label": "Books & Reference"
+  },
+  {
+    "id": "BUSINESS",
+    "label": "Business"
   },
   {
     "id": "COMICS",
@@ -29,6 +41,14 @@ export const generatedPlayCategories: PlayCategory[] = [
     "label": "Finance"
   },
   {
+    "id": "FOOD_AND_DRINK",
+    "label": "Food & Drink"
+  },
+  {
+    "id": "GAME",
+    "label": "Game"
+  },
+  {
     "id": "GAME_ACTION",
     "label": "Game Action"
   },
@@ -45,6 +65,10 @@ export const generatedPlayCategories: PlayCategory[] = [
     "label": "Game Brain"
   },
   {
+    "id": "GAME_CARD",
+    "label": "Game Card"
+  },
+  {
     "id": "GAME_CARDS",
     "label": "Game Cards"
   },
@@ -57,6 +81,18 @@ export const generatedPlayCategories: PlayCategory[] = [
     "label": "Game Casual"
   },
   {
+    "id": "GAME_EDUCATIONAL",
+    "label": "Game Educational"
+  },
+  {
+    "id": "GAME_FAMILY",
+    "label": "Game Family"
+  },
+  {
+    "id": "GAME_MUSIC",
+    "label": "Game Music"
+  },
+  {
     "id": "GAME_PUZZLE",
     "label": "Game Puzzle"
   },
@@ -67,6 +103,10 @@ export const generatedPlayCategories: PlayCategory[] = [
   {
     "id": "GAME_ROLE_PLAYING",
     "label": "Game Role Playing"
+  },
+  {
+    "id": "GAME_SIMULATION",
+    "label": "Game Simulation"
   },
   {
     "id": "GAME_SPORTS",
@@ -89,8 +129,24 @@ export const generatedPlayCategories: PlayCategory[] = [
     "label": "Health & Fitness"
   },
   {
+    "id": "HOUSE_AND_HOME",
+    "label": "House & Home"
+  },
+  {
     "id": "LIFESTYLE",
     "label": "Lifestyle"
+  },
+  {
+    "id": "MAPS_AND_NAVIGATION",
+    "label": "Maps & Navigation"
+  },
+  {
+    "id": "MEDIA_AND_VIDEO",
+    "label": "Media & Video"
+  },
+  {
+    "id": "MEDICAL",
+    "label": "Medical"
   },
   {
     "id": "MUSIC_AND_AUDIO",
@@ -135,6 +191,10 @@ export const generatedPlayCategories: PlayCategory[] = [
   {
     "id": "TRAVEL_AND_LOCAL",
     "label": "Travel & Local"
+  },
+  {
+    "id": "VIDEO_PLAYERS",
+    "label": "Video Players"
   },
   {
     "id": "WEATHER",

@@ -27,6 +27,7 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -39,9 +40,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -89,7 +92,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -1719,6 +1724,7 @@ private fun InstalledPackagesPage(
     onAppClick: (StoreApp) -> Unit
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val packageManager = context.packageManager
     val packages = remember(storeApps, context, installedAppsRefreshKey) {
         val appsById = storeApps.associateBy { it.id.trim().lowercase(Locale.ROOT) }
@@ -2706,9 +2712,14 @@ private fun AppDetailsPage(
     onAppClick: (StoreApp) -> Unit
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val packageManager = context.packageManager
     val uriHandler = LocalUriHandler.current
-    val unsupportedOnDeviceMessage = stringResource(R.string.availability_restriction_hardware_app)
+    val unsupportedOnDeviceMessage = tr(
+        "Это приложение больше не совместимо с вашим устройством.",
+        "This app isn't compatible with your device anymore."
+    )
+    val unsupportedActionLabel = tr("НЕ ПОДДЕРЖИВАЕТСЯ", "NOT COMPATIBLE")
     val abiIncompatibleMessage = stringResource(R.string.install_failed_cpu_abi_incompatible)
     val screenshotImages = remember(app.id, app.screenshots, app.iconUrl) {
         app.screenshots
@@ -2769,6 +2780,7 @@ private fun AppDetailsPage(
     var showInstallAuthDialog by rememberSaveable(app.id) { mutableStateOf(false) }
     var fullscreenShotIndex by rememberSaveable(app.id) { mutableStateOf<Int?>(null) }
     var localInstallErrorMessage by rememberSaveable(app.id) { mutableStateOf<String?>(null) }
+    var headerActionWidthPx by rememberSaveable(app.id) { mutableIntStateOf(0) }
     val installProgress = installSession?.progress
     val installStage = installSession?.stage ?: INSTALL_STAGE_IDLE
     val installDownloadedBytes = installSession?.downloadedBytes ?: 0L
@@ -2777,7 +2789,7 @@ private fun AppDetailsPage(
 
     val startInstallFlow = startInstallFlow@{
         if (isUnsupportedForCurrentDevice) {
-            localInstallErrorMessage = abiIncompatibleMessage
+            localInstallErrorMessage = null
             onMarkUnsupportedForCurrentApi()
             return@startInstallFlow
         }
@@ -2837,7 +2849,10 @@ private fun AppDetailsPage(
             }
         )
     }
-    if (!installErrorMessage.isNullOrBlank()) {
+    val shouldShowInstallErrorDialog = !installErrorMessage.isNullOrBlank() &&
+        !(isUnsupportedForCurrentDevice && installErrorMessage == abiIncompatibleMessage)
+
+    if (shouldShowInstallErrorDialog) {
         LegacyInstallErrorDialog(
             appName = app.name,
             message = installErrorMessage.orEmpty(),
@@ -2920,20 +2935,23 @@ private fun AppDetailsPage(
                             Text("${app.reviews} ${tr("отзывов", "reviews")}", color = Color(0xFF9A9A9A), fontSize = 11.sp, maxLines = 1)
                         } else {
                             Spacer(Modifier.height(6.dp))
+                            val headerActionWidthDp = with(density) { headerActionWidthPx.toDp() }
                             HeaderDownloadProgressPanel(
-                                progress = installProgress ?: 0,
+                                progress = installProgress,
                                 stage = installStage,
                                 downloadedBytes = installDownloadedBytes,
                                 totalBytes = installTotalBytes,
                                 onCancel = onCancelInstall,
                                 modifier = Modifier.fillMaxWidth(),
-                                showCancel = false
+                                showCancel = false,
+                                barTrailingOverlap = headerActionWidthDp + 8.dp
                             )
                         }
                     }
                     Column(
                         modifier = Modifier
                             .align(Alignment.Top)
+                            .onSizeChanged { headerActionWidthPx = it.width }
                             .padding(top = 2.dp),
                         horizontalAlignment = Alignment.End
                     ) {
@@ -2942,19 +2960,18 @@ private fun AppDetailsPage(
                             Spacer(Modifier.height(6.dp))
                         }
                         if (installProgress == null) {
-                            val detailsActionButtonModifier = Modifier
-                                .width(122.dp)
-                                .height(40.dp)
-                            val primaryActionButtonModifier = if (isUnsupportedForCurrentDevice) {
+                            val detailsActionButtonModifier = if (isUnsupportedForCurrentDevice) {
                                 Modifier
-                                    .width(162.dp)
-                                    .heightIn(min = 44.dp)
+                                    .width(170.dp)
+                                    .height(40.dp)
                             } else {
-                                detailsActionButtonModifier
+                                Modifier
+                                    .width(122.dp)
+                                    .height(40.dp)
                             }
                             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Box(
-                                    primaryActionButtonModifier
+                                    detailsActionButtonModifier
                                         .background(
                                             if (isUnsupportedForCurrentDevice) Color(0xFFD8D8D8) else Color(0xFFAFCA34),
                                             RoundedCornerShape(2.dp)
@@ -2982,18 +2999,18 @@ private fun AppDetailsPage(
                                 ) {
                                     Text(
                                         text = when {
-                                            isUnsupportedForCurrentDevice -> unsupportedOnDeviceMessage
+                                            isUnsupportedForCurrentDevice -> unsupportedActionLabel
                                             isInstalledOnDevice -> stringResource(R.string.open).uppercase(Locale.getDefault())
                                             app.isFree -> stringResource(R.string.install).uppercase(Locale.getDefault())
                                             else -> priceLabelForUi(app)
                                         },
                                         color = if (isUnsupportedForCurrentDevice) Color(0xFF636363) else Color.White,
-                                        fontSize = if (isUnsupportedForCurrentDevice) 10.sp else 12.sp,
+                                        fontSize = if (isUnsupportedForCurrentDevice) 11.sp else 12.sp,
                                         fontWeight = FontWeight.Bold,
                                         modifier = Modifier.fillMaxWidth(),
                                         textAlign = TextAlign.Center,
-                                        maxLines = if (isUnsupportedForCurrentDevice) 3 else 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Clip
                                     )
                                 }
                                 if (isInstalledOnDevice) {
@@ -3029,6 +3046,9 @@ private fun AppDetailsPage(
                             }
                         }
                     }
+                }
+                if (isUnsupportedForCurrentDevice) {
+                    LegacyDeviceIncompatibleWarning(message = unsupportedOnDeviceMessage)
                 }
             }
             HorizontalDivider(color = Color(0x12000000))
@@ -3152,17 +3172,20 @@ private fun AppDetailsPage(
                 if (loadingDetails) {
                     LegacyDetailsInfoSkeleton()
                 } else {
-                    DetailMetaRow(stringResource(R.string.details_category_label), categoryLabelRu(app.category))
-                    DetailMetaRow(stringResource(R.string.details_developer_label), app.publisher)
-                    DetailMetaRow(stringResource(R.string.details_age_label), app.contentRating.ifBlank { stringResource(R.string.details_everyone) })
-                    if (app.version.isNotBlank()) {
-                        DetailMetaRow(stringResource(R.string.details_version_label), app.version)
-                    }
-                    if (app.sizeLabel.isNotBlank()) {
-                        DetailMetaRow(stringResource(R.string.details_size_label), app.sizeLabel)
-                    }
-                    if (app.requiresAndroid.isNotBlank()) {
-                        DetailMetaRow("Android", app.requiresAndroid)
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        DetailMetaRow(stringResource(R.string.details_category_label), categoryLabelRu(app.category))
+                        DetailMetaRow(stringResource(R.string.details_developer_label), app.publisher)
+                        DetailMetaRow(stringResource(R.string.details_age_label), app.contentRating.ifBlank { stringResource(R.string.details_everyone) })
+                        if (app.version.isNotBlank()) {
+                            DetailMetaRow(stringResource(R.string.details_version_label), app.version)
+                        }
+                        DetailMetaRow(
+                            stringResource(R.string.details_size_label),
+                            app.sizeLabel.ifBlank { tr("Неизвестно", "Unknown") }
+                        )
+                        if (app.requiresAndroid.isNotBlank()) {
+                            DetailMetaRow("Android", app.requiresAndroid)
+                        }
                     }
                 }
             }
@@ -3217,7 +3240,8 @@ private fun HeaderDownloadProgressPanel(
     totalBytes: Long?,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
-    showCancel: Boolean = true
+    showCancel: Boolean = true,
+    barTrailingOverlap: Dp = 0.dp
 ) {
     val isPreparing = stage == INSTALL_STAGE_PREPARING
     val isInstalling = stage == INSTALL_STAGE_INSTALLING
@@ -3241,29 +3265,30 @@ private fun HeaderDownloadProgressPanel(
         total != null -> "$actualProgress%"
         else -> tr("Загрузка", "Downloading")
     }
+    val overlapCompensation = if (barTrailingOverlap > 0.dp) barTrailingOverlap / 2 else 0.dp
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(3.dp),
         horizontalAlignment = Alignment.Start
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = bytesLabel,
-                color = Color(0xFF8B8B8B),
-                fontSize = 10.sp,
-                maxLines = 1
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = progressText,
-                color = Color(0xFF8B8B8B),
-                fontSize = 10.sp,
-                maxLines = 1
-            )
-            if (showCancel) {
+        if (showCancel) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = bytesLabel,
+                    color = Color(0xFF8B8B8B),
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = progressText,
+                    color = Color(0xFF8B8B8B),
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
                 Spacer(Modifier.width(6.dp))
                 Image(
                     painter = painterResource(R.drawable.ic_menu_close_clear_cancel_light),
@@ -3273,11 +3298,51 @@ private fun HeaderDownloadProgressPanel(
                         .clickable { onCancel() }
                 )
             }
-        }
-        if (isPreparing || isInstalling || actualProgress < 0 || total == null) {
-            LegacyKitkatWaitingBar(modifier = Modifier.fillMaxWidth())
         } else {
-            LegacyThinProgressBar(progress = actualProgress, modifier = Modifier.fillMaxWidth())
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                val extendedWidth = if (barTrailingOverlap > 0.dp) maxWidth + barTrailingOverlap else maxWidth
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = bytesLabel,
+                        color = Color(0xFF8B8B8B),
+                        fontSize = 10.sp,
+                        maxLines = 1
+                    )
+                }
+                if (progressText.isNotBlank()) {
+                    Text(
+                        text = progressText,
+                        color = Color(0xFF8B8B8B),
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier
+                            .requiredWidth(extendedWidth)
+                            .offset(x = overlapCompensation)
+                            .align(Alignment.CenterStart)
+                    )
+                }
+            }
+        }
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val extendedWidth = if (barTrailingOverlap > 0.dp) maxWidth + barTrailingOverlap else maxWidth
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                val barModifier = Modifier
+                    .requiredWidth(extendedWidth)
+                    .offset(x = overlapCompensation)
+                    .align(Alignment.CenterStart)
+                if (isPreparing || isInstalling || actualProgress < 0 || total == null) {
+                    LegacyKitkatWaitingBar(modifier = barModifier)
+                } else {
+                    LegacyThinProgressBar(progress = actualProgress, modifier = barModifier)
+                }
+            }
         }
     }
 }
@@ -3457,6 +3522,32 @@ private fun DetailsSmallAction(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+private fun LegacyDeviceIncompatibleWarning(message: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp)
+            .background(Color(0xFFF4E6EC))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Image(
+            painter = painterResource(R.drawable.ic_menu_warning),
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            colorFilter = ColorFilter.tint(Color(0xFFAF1D55))
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = message,
+            color = Color(0xFFAF1D55),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium
         )
     }
 }
@@ -3723,15 +3814,27 @@ private fun DetailsContentBlock(
 
 @Composable
 private fun DetailMetaRow(label: String, value: String) {
+    val normalizedLabel = label.trim().trimEnd(':')
+    val normalizedValue = value
+        .lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .joinToString(" ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+    if (normalizedLabel.isBlank() || normalizedValue.isBlank()) {
+        return
+    }
+
     Row(
         Modifier
             .fillMaxWidth()
             .background(Color.White)
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .padding(horizontal = 10.dp, vertical = 2.dp)
     ) {
-        Text("$label:", color = Color(0xFF555555), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text("$normalizedLabel:", color = Color(0xFF555555), fontSize = 12.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.width(8.dp))
-        Text(value, color = Color(0xFF666666), fontSize = 12.sp)
+        Text(normalizedValue, color = Color(0xFF666666), fontSize = 12.sp)
     }
 }
 

@@ -42,6 +42,7 @@ const MAX_RATE_LIMIT_DELAY_MS = Number.parseInt(
 const USER_AGENT =
   process.env.PLAY_ARCHIVE_USER_AGENT ??
   "play-google-api-archive-icons/1.0 (+local script)";
+const PACKAGE_ID_RE = /^[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)+$/;
 
 function emptyAppsModule() {
   return [
@@ -53,6 +54,30 @@ function emptyAppsModule() {
     `export const ${EXPORT_NAME}: AppData[] = [];`,
     "",
   ].join("\n");
+}
+
+function parsePackageIdsInput(rawValue, label = "--packages") {
+  const valid = [];
+  const invalid = [];
+
+  for (const token of String(rawValue ?? "")
+    .split(/[\s,;\n\r\t]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)) {
+    if (PACKAGE_ID_RE.test(token)) {
+      valid.push(token);
+    } else {
+      invalid.push(token);
+    }
+  }
+
+  if (invalid.length > 0) {
+    console.warn(
+      `[archive-icons] ignored invalid package ids from ${label}: ${invalid.join(", ")}`,
+    );
+  }
+
+  return valid;
 }
 
 function parseArgs(argv) {
@@ -95,15 +120,29 @@ function parseArgs(argv) {
     }
 
     if (arg.startsWith("--packages=")) {
-      options.packages = Array.from(
-        new Set(
-          arg
-            .slice("--packages=".length)
-            .split(/[\s,;\n\r\t]+/)
-            .map((item) => item.trim())
-            .filter(Boolean),
-        ),
+      const parsed = parsePackageIdsInput(
+        arg.slice("--packages=".length),
+        "--packages",
       );
+      options.packages = Array.from(new Set([...options.packages, ...parsed]));
+      continue;
+    }
+
+    if (arg.startsWith("--package=")) {
+      const parsed = parsePackageIdsInput(
+        arg.slice("--package=".length),
+        "--package",
+      );
+      options.packages = Array.from(new Set([...options.packages, ...parsed]));
+      continue;
+    }
+
+    if (arg.startsWith("--package-id=")) {
+      const parsed = parsePackageIdsInput(
+        arg.slice("--package-id=".length),
+        "--package-id",
+      );
+      options.packages = Array.from(new Set([...options.packages, ...parsed]));
     }
   }
 

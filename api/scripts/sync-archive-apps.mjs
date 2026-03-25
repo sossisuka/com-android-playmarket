@@ -32,7 +32,7 @@ const DEFAULT_TIMEOUT_MS = Number.parseInt(
   10,
 );
 const DEFAULT_FALLBACK_STEP_TIMEOUT_MS = Number.parseInt(
-  process.env.PLAY_ARCHIVE_SYNC_FALLBACK_STEP_TIMEOUT_MS ?? "25000",
+  process.env.PLAY_ARCHIVE_SYNC_FALLBACK_STEP_TIMEOUT_MS ?? "45000",
   10,
 );
 const DEFAULT_DETAIL_PROBE_LIMIT = Number.parseInt(
@@ -40,7 +40,11 @@ const DEFAULT_DETAIL_PROBE_LIMIT = Number.parseInt(
   10,
 );
 const DEFAULT_MEDIA_VALIDATE_TIMEOUT_MS = Number.parseInt(
-  process.env.PLAY_ARCHIVE_SYNC_MEDIA_VALIDATE_TIMEOUT_MS ?? "8000",
+  process.env.PLAY_ARCHIVE_SYNC_MEDIA_VALIDATE_TIMEOUT_MS ?? "15000",
+  10,
+);
+const DEFAULT_MEDIA_FALLBACK_PROBE_LIMIT = Number.parseInt(
+  process.env.PLAY_ARCHIVE_SYNC_MEDIA_FALLBACK_PROBE_LIMIT ?? "32",
   10,
 );
 const DEFAULT_RETRY_COUNT = Number.parseInt(
@@ -277,6 +281,30 @@ function normalizePackageIds(values) {
   ].sort((left, right) => left.localeCompare(right));
 }
 
+function parsePackageIdsInput(rawValue, label = "--packages") {
+  const valid = [];
+  const invalid = [];
+
+  for (const token of String(rawValue ?? "")
+    .split(/[\s,;\n\r\t]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)) {
+    if (PACKAGE_ID_RE.test(token)) {
+      valid.push(token);
+    } else {
+      invalid.push(token);
+    }
+  }
+
+  if (invalid.length > 0) {
+    console.warn(
+      `[archive-sync] ignored invalid package ids from ${label}: ${invalid.join(", ")}`,
+    );
+  }
+
+  return valid;
+}
+
 async function loadMissingApps(filePath) {
   try {
     const text = await readFile(filePath, "utf8");
@@ -390,15 +418,29 @@ function parseArgs(argv) {
     }
 
     if (arg.startsWith("--packages=")) {
-      options.packages = Array.from(
-        new Set(
-          arg
-            .slice("--packages=".length)
-            .split(/[\s,;\n\r\t]+/)
-            .map((item) => item.trim())
-            .filter(Boolean),
-        ),
+      const parsed = parsePackageIdsInput(
+        arg.slice("--packages=".length),
+        "--packages",
       );
+      options.packages = Array.from(new Set([...options.packages, ...parsed]));
+      continue;
+    }
+
+    if (arg.startsWith("--package=")) {
+      const parsed = parsePackageIdsInput(
+        arg.slice("--package=".length),
+        "--package",
+      );
+      options.packages = Array.from(new Set([...options.packages, ...parsed]));
+      continue;
+    }
+
+    if (arg.startsWith("--package-id=")) {
+      const parsed = parsePackageIdsInput(
+        arg.slice("--package-id=".length),
+        "--package-id",
+      );
+      options.packages = Array.from(new Set([...options.packages, ...parsed]));
       continue;
     }
 
@@ -501,13 +543,13 @@ function logArchiveSync(stage, message) {
 
 function findMatchingArrayEnd(text, startIndex) {
   let depth = 0;
-  let inString = false;
+  let stringQuote = "";
   let escaped = false;
 
   for (let index = startIndex; index < text.length; index += 1) {
     const char = text[index];
 
-    if (inString) {
+    if (stringQuote) {
       if (escaped) {
         escaped = false;
         continue;
@@ -516,14 +558,14 @@ function findMatchingArrayEnd(text, startIndex) {
         escaped = true;
         continue;
       }
-      if (char === '"') {
-        inString = false;
+      if (char === stringQuote) {
+        stringQuote = "";
       }
       continue;
     }
 
-    if (char === '"') {
-      inString = true;
+    if (char === '"' || char === "'" || char === "`") {
+      stringQuote = char;
       continue;
     }
 
@@ -555,7 +597,17 @@ function parseGeneratedArray(sourceText, exportName) {
   const endIndex = findMatchingArrayEnd(sourceText, startIndex);
   if (endIndex < 0) return [];
 
-  return JSON.parse(sourceText.slice(startIndex, endIndex + 1));
+  const payload = sourceText.slice(startIndex, endIndex + 1);
+
+  try {
+    return JSON.parse(payload);
+  } catch (jsonError) {
+    try {
+      const parsed = Function(`"use strict"; return (${payload});`)();
+      if (Array.isArray(parsed)) return parsed;
+    } catch {}
+    throw jsonError;
+  }
 }
 
 async function loadAppsFile(sourcePath) {
@@ -985,6 +1037,78 @@ function normalizePrice(metaValue, textValue) {
   return compact;
 }
 
+function normalizeUsdAmount(value) {
+  const source = cleanText(value);
+  if (!source) return "";
+
+  const amountMatch = source.match(/(\d[\d\s.,\u00a0]*)/);
+  if (!amountMatch?.[1]) return "";
+
+  let token = amountMatch[1].replace(/\u00a0/g, "").replace(/\s+/g, "");
+  if (!token) return "";
+
+  const hasComma = token.includes(",");
+  const hasDot = token.includes(".");
+  if (hasComma && hasDot) {
+    const lastComma = token.lastIndexOf(",");
+    const lastDot = token.lastIndexOf(".");
+    const decimalSep = lastComma > lastDot ? "," : ".";
+    const thousandSep = decimalSep === "," ? "." : ",";
+    token = token.split(thousandSep).join("");
+    if (decimalSep === ",") token = token.replace(/,/g, ".");
+  } else if (hasComma) {
+    const firstComma = token.indexOf(",");
+    const fracLength = token.length - firstComma - 1;
+    token =
+      fracLength === 3 ? token.replace(/,/g, "") : token.replace(/,/g, ".");
+  } else if (hasDot) {
+    const parts = token.split(".");
+    if (parts.length > 2) {
+      const frac = parts.pop() ?? "";
+      token = `${parts.join("")}.${frac}`;
+    }
+  }
+
+  const numeric = Number.parseFloat(token);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "";
+  return numeric
+    .toFixed(2)
+    .replace(/\.00$/, "")
+    .replace(/(\.\d)0$/, "$1");
+}
+
+function normalizeUsdPrice(metaValue, textValue) {
+  const raw = cleanText(metaValue) || cleanText(textValue);
+  if (!raw || raw === "0" || raw === "0.0" || raw === "0,0") {
+    return "FREE";
+  }
+
+  const normalized = normalizeDateToken(raw);
+  if (
+    /\b(free|gratuit|gratis|бесплатно|bezplatna|gratuito|kostenlos)\b/i.test(
+      normalized,
+    )
+  ) {
+    return "FREE";
+  }
+
+  const compact = raw
+    .replace(/\b(?:buy|install|download|open|update)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const explicitUsdAmount = normalizeUsdAmount(
+    firstMatch(compact, [
+      /(?:US\$|USD|\$)\s*([\d.,\u00a0 ]+)/i,
+      /([\d.,\u00a0 ]+)\s*(?:US\$|USD|\$)/i,
+    ]),
+  );
+  if (explicitUsdAmount) return `USD ${explicitUsdAmount}`;
+
+  const anyAmount = normalizeUsdAmount(compact);
+  if (anyAmount) return `USD ${anyAmount}`;
+  return "USD";
+}
+
 function normalizeCategorySlug(slug, label = "") {
   const rawSlug = String(slug ?? "")
     .trim()
@@ -1038,6 +1162,219 @@ function normalizeDescriptionBlocks(value) {
         .trim(),
     )
     .filter(Boolean);
+}
+
+function extractLeadingText(value) {
+  const source = String(value ?? "");
+  if (!source) return "";
+
+  const leading = firstMatch(source, [/^\s*(?:<[^>]+>\s*)*([^<]+)/]);
+  return cleanText(leading || source);
+}
+
+const LOCALE_LATIN_RE = /[A-Za-z]/g;
+const LOCALE_CYRILLIC_RE = /[\u0400-\u04FF]/g;
+const LOCALE_RU_EN_LETTER_RE = /[A-Za-z\u0400-\u04FF]/g;
+const LOCALE_ANY_LETTER_RE = /\p{L}/gu;
+const LOCALE_LATIN_EXTENDED_RE = /[\u00C0-\u024F]/g;
+const LOCALE_DIGIT_RE = /\d/g;
+const LOCALE_EN_HINT_RE =
+  /\b(and|up|everyone|low|maturity|teen|mature|rated|for|android|requires|version|install|installs|download|free|privacy|policy|new)\b/i;
+const LOCALE_DISALLOWED_RE =
+  /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u30FF\u31F0-\u31FF\uAC00-\uD7AF\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0900-\u097F\u0E00-\u0E7F]/g;
+
+function countRegexMatches(value, pattern) {
+  const source = String(value ?? "");
+  if (!source) return 0;
+  const matches = source.match(pattern);
+  return matches ? matches.length : 0;
+}
+
+function hasDisallowedLocaleChars(value) {
+  return countRegexMatches(cleanText(value), LOCALE_DISALLOWED_RE) > 0;
+}
+
+function hasOnlyRuEnLetters(value) {
+  const text = cleanText(value);
+  if (!text) return true;
+  const totalLetters = countRegexMatches(text, LOCALE_ANY_LETTER_RE);
+  if (totalLetters === 0) return true;
+  const ruEnLetters = countRegexMatches(text, LOCALE_RU_EN_LETTER_RE);
+  return ruEnLetters === totalLetters;
+}
+
+function localeTextScore(value) {
+  const text = cleanText(value);
+  if (!text) return 0;
+
+  const latin = countRegexMatches(text, LOCALE_LATIN_RE);
+  const cyrillic = countRegexMatches(text, LOCALE_CYRILLIC_RE);
+  const totalLetters = countRegexMatches(text, LOCALE_ANY_LETTER_RE);
+  const ruEnLetters = countRegexMatches(text, LOCALE_RU_EN_LETTER_RE);
+  const foreignLetters = Math.max(totalLetters - ruEnLetters, 0);
+  const extendedLatin = countRegexMatches(text, LOCALE_LATIN_EXTENDED_RE);
+  const digits = countRegexMatches(text, LOCALE_DIGIT_RE);
+  const disallowed = countRegexMatches(text, LOCALE_DISALLOWED_RE);
+
+  let score = latin * 3 + cyrillic * 3 + digits * 0.2 - extendedLatin * 0.5;
+  score -= foreignLetters * 4;
+  if (totalLetters > 0) {
+    if (foreignLetters === 0) {
+      score += 40;
+    } else {
+      score -= 80;
+    }
+  }
+  if (disallowed > 0) {
+    score -= disallowed * 12;
+    score -= 40;
+  }
+  return score;
+}
+
+function localeHintScore(value) {
+  const text = cleanText(value);
+  if (!text) return 0;
+  if (countRegexMatches(text, LOCALE_CYRILLIC_RE) > 0) return 25;
+  const normalized = normalizeDateToken(text);
+  return LOCALE_EN_HINT_RE.test(normalized) ? 20 : -20;
+}
+
+function scoreDetailLocale(detail) {
+  const descriptionFirst = Array.isArray(detail?.description)
+    ? detail.description[0]
+    : "";
+  const whatsNewFirst = Array.isArray(detail?.whatsNew)
+    ? detail.whatsNew[0]
+    : "";
+  const normalizedName = normalizeDateToken(detail?.name);
+
+  let score =
+    localeTextScore(detail?.name) * 4 +
+    localeTextScore(detail?.publisher) * 3 +
+    localeTextScore(detail?.contentRating) * 3 +
+    localeTextScore(descriptionFirst) * 2 +
+    localeTextScore(whatsNewFirst) +
+    localeTextScore(detail?.requiresAndroid) +
+    localeTextScore(detail?.version) * 0.5 +
+    localeTextScore(detail?.installs) * 0.5 +
+    localeTextScore(detail?.size) * 0.5;
+
+  score += localeHintScore(detail?.contentRating) * 6;
+  score += localeHintScore(detail?.requiresAndroid) * 4;
+  score += localeHintScore(detail?.name) * 2;
+  if (normalizedName.includes("google play")) {
+    score -= 180;
+  }
+  return score;
+}
+
+function detailHasDisallowedLocale(detail) {
+  const values = [
+    detail?.name,
+    detail?.publisher,
+    detail?.contentRating,
+    detail?.requiresAndroid,
+    detail?.version,
+    detail?.size,
+    detail?.installs,
+    ...(Array.isArray(detail?.description)
+      ? detail.description.slice(0, 2)
+      : []),
+    ...(Array.isArray(detail?.whatsNew) ? detail.whatsNew.slice(0, 2) : []),
+  ];
+  return values.some((item) => hasDisallowedLocaleChars(item));
+}
+
+function sanitizeLocaleText(value) {
+  const text = cleanText(value);
+  if (!text) return "";
+  if (hasDisallowedLocaleChars(text)) return "";
+  if (!hasOnlyRuEnLetters(text)) return "";
+  return text;
+}
+
+function sanitizeLocaleBlocks(values) {
+  if (!Array.isArray(values)) return [];
+  const normalized = [];
+  for (const value of values) {
+    const text = sanitizeLocaleText(value);
+    if (!text) continue;
+    normalized.push(text);
+  }
+  return normalized;
+}
+
+function sanitizeDetailLocaleFields(detail) {
+  const next = { ...detail };
+  next.name = sanitizeLocaleText(next.name);
+  next.publisher = sanitizeLocaleText(next.publisher);
+  next.price = isBlankText(next.price) ? "" : normalizeUsdPrice("", next.price);
+  next.size = sanitizeLocaleText(next.size);
+  next.installs = sanitizeLocaleText(next.installs);
+  next.version = sanitizeLocaleText(next.version);
+  const requiresAndroid = sanitizeLocaleText(next.requiresAndroid);
+  next.requiresAndroid =
+    requiresAndroid && localeHintScore(requiresAndroid) >= 0
+      ? requiresAndroid
+      : "";
+  const contentRating = sanitizeLocaleText(next.contentRating);
+  next.contentRating =
+    contentRating && localeHintScore(contentRating) >= 0 ? contentRating : "";
+  next.description = sanitizeLocaleBlocks(next.description);
+  next.whatsNew = sanitizeLocaleBlocks(next.whatsNew);
+  return next;
+}
+
+function normalizeAppTitle(value, publisher = "") {
+  let text = cleanText(value);
+  if (!text) return "";
+
+  text = text
+    .replace(
+      /\s*[-|–—]\s*(?:android\s+apps?\s+on\s+google\s+play|apps?\s+on\s+google\s+play|google\s+play)\s*$/i,
+      "",
+    )
+    .replace(/\s*[-|–—]\s*[^-|–—]*google\s+play.*$/i, "")
+    .replace(/\s*\|\s*google\s+play.*$/i, "")
+    .trim();
+
+  if (!text) return "";
+  if (
+    publisher &&
+    normalizeDateToken(text) === normalizeDateToken(cleanText(publisher))
+  ) {
+    return "";
+  }
+  return text;
+}
+
+function applyLocaleSafeTextFields(baseDetail, candidateDetail) {
+  const setIfNonBlank = (key) => {
+    const value = sanitizeLocaleText(candidateDetail?.[key]);
+    if (!value) return;
+    baseDetail[key] = value;
+  };
+
+  setIfNonBlank("name");
+  setIfNonBlank("publisher");
+  setIfNonBlank("size");
+  setIfNonBlank("installs");
+  setIfNonBlank("version");
+  setIfNonBlank("requiresAndroid");
+  setIfNonBlank("contentRating");
+  if (!isBlankText(candidateDetail?.price)) {
+    baseDetail.price = normalizeUsdPrice("", candidateDetail.price);
+  }
+
+  const description = sanitizeLocaleBlocks(candidateDetail?.description);
+  if (description.length > 0) {
+    baseDetail.description = description;
+  }
+  const whatsNew = sanitizeLocaleBlocks(candidateDetail?.whatsNew);
+  if (whatsNew.length > 0) {
+    baseDetail.whatsNew = whatsNew;
+  }
 }
 
 function parseNumber(value) {
@@ -1211,12 +1548,15 @@ function extractCategory(html) {
 function extractDetailFields(html, detailTimestamp) {
   const metadata = extractMetadataMap(html);
   const media = extractDetailMedia(html);
-  const name = cleanText(
+  let name = cleanText(
     firstMatch(html, [
       /<span[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/span>/i,
       /<h1[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/h1>/i,
       /<h1[^>]*itemprop="name"[^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
       /<h1[^>]*itemprop="name"[^>]*>\s*<div[^>]*>([\s\S]*?)<\/div>/i,
+      /<h1[^>]*class="[^"]*\bAHFaub\b[^"]*"[^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
+      /<h1[^>]*class="[^"]*\bFd93Bb\b[^"]*"[^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
+      /<h1[^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>\s*<\/h1>/i,
       /<h1[^>]*class="[^"]*\bdocument-title\b[^"]*"[^>]*>\s*<div[^>]*>([\s\S]*?)<\/div>/i,
       /<div class="document-title"[^>]*itemprop="name"[^>]*>\s*<div[^>]*>([\s\S]*?)<\/div>/i,
       /<div class="document-title"[^>]*>\s*<div[^>]*>([\s\S]*?)<\/div>/i,
@@ -1234,6 +1574,22 @@ function extractDetailFields(html, detailTimestamp) {
       /itemprop="author"[\s\S]*?<a[^>]*itemprop="name"[^>]*>([\s\S]*?)<\/a>/i,
     ]),
   );
+  const normalizedName = normalizeAppTitle(name, publisher);
+  if (normalizedName) {
+    name = normalizedName;
+  } else {
+    const titleFallback = normalizeAppTitle(
+      firstMatch(html, [
+        /<meta[^>]*property="og:title"[^>]*content="([^"]+)"/i,
+        /<meta[^>]*content="([^"]+)"[^>]*property="og:title"/i,
+        /<title[^>]*>([\s\S]*?)<\/title>/i,
+      ]),
+      publisher,
+    );
+    if (titleFallback) {
+      name = titleFallback;
+    }
+  }
   const icon = sanitizeMediaUrl(
     decodeAttribute(
       firstMatch(html, [
@@ -1317,6 +1673,14 @@ function extractDetailFields(html, detailTimestamp) {
   const updatedAt = parseLocalizedDateToIso(updatedRaw, detailTimestamp);
   const reviews = parseNumber(ratingCountRaw);
   const ratingValue = Number.parseFloat(ratingValueRaw.replace(",", "."));
+  const contentRatingRaw =
+    metadata.get("contentRating") ??
+    firstMatch(html, [
+      /itemprop="contentRating"[^>]*content="([^"]+)"/i,
+      /content="([^"]+)"[^>]*itemprop="contentRating"/i,
+      /itemprop="contentRating"[^>]*>([\s\S]*?)<\/div>/i,
+      /itemprop="contentRating"[^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
+    ]);
 
   return {
     name,
@@ -1327,20 +1691,13 @@ function extractDetailFields(html, detailTimestamp) {
     trailerUrl: media.trailerUrl,
     screenshots: sanitizeMediaList(media.screenshots),
     category: extractCategory(html),
-    price: normalizePrice(priceMeta, priceText),
+    price: normalizeUsdPrice(priceMeta, priceText),
     updatedAt,
     size: cleanText(metadata.get("size")),
     installs: normalizeInstalls(installsRaw),
     version: cleanText(metadata.get("version")),
     requiresAndroid: cleanText(metadata.get("requiresAndroid")),
-    contentRating:
-      cleanText(metadata.get("contentRating")) ||
-      cleanText(
-        firstMatch(html, [
-          /itemprop="contentRating"[^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
-          /itemprop="contentRating"[^>]*>([\s\S]*?)<\/span>/i,
-        ]),
-      ),
+    contentRating: extractLeadingText(contentRatingRaw),
     description: normalizeDescriptionBlocks(descriptionHtml),
     whatsNew: normalizeDescriptionBlocks(whatsNew.join("\n")),
     ratingValue: Number.isFinite(ratingValue) ? ratingValue : undefined,
@@ -1643,17 +2000,31 @@ async function fetchValidatedIconBinary(url, label) {
   return image;
 }
 
-function buildCdxUrl(url, year, fields = "timestamp,original") {
-  return (
-    "https://web.archive.org/cdx/search/cdx?" +
-    `url=${encodeURIComponent(url)}` +
-    `&from=${year}&to=${year}` +
-    "&output=json" +
-    `&fl=${fields}` +
-    "&filter=statuscode:200" +
-    "&filter=mimetype:text/html" +
-    "&collapse=digest"
-  );
+function buildCdxUrl(
+  url,
+  year,
+  fields = "timestamp,original",
+  { mimetype = "text/html", collapse = "digest", limit = 0 } = {},
+) {
+  const params = new URLSearchParams();
+  params.set("url", String(url ?? ""));
+  if (Number.isInteger(year) && YEAR_RE.test(String(year))) {
+    params.set("from", String(year));
+    params.set("to", String(year));
+  }
+  params.set("output", "json");
+  params.set("fl", fields);
+  params.append("filter", "statuscode:200");
+  if (mimetype) {
+    params.append("filter", `mimetype:${mimetype}`);
+  }
+  if (collapse) {
+    params.set("collapse", collapse);
+  }
+  if (Number.isFinite(limit) && Number(limit) !== 0) {
+    params.set("limit", String(limit));
+  }
+  return `https://web.archive.org/cdx/search/cdx?${params.toString()}`;
 }
 
 async function fetchCdxRows(url, year) {
@@ -1668,6 +2039,29 @@ async function fetchCdxRows(url, year) {
     timestamp: String(row[0] ?? ""),
     original: String(row[1] ?? url),
   }));
+}
+
+async function fetchCdxRowsAllYears(
+  url,
+  limit = DEFAULT_MEDIA_FALLBACK_PROBE_LIMIT,
+) {
+  const response = await fetchArchive(
+    buildCdxUrl(url, undefined, "timestamp,original"),
+    `cdx-all:${url}`,
+    "cdx",
+  );
+  const rows = JSON.parse(await response.text());
+  if (!Array.isArray(rows) || rows.length <= 1) return [];
+  const normalized = rows
+    .slice(1)
+    .map((row) => ({
+      timestamp: String(row[0] ?? ""),
+      original: String(row[1] ?? url),
+    }))
+    .filter((row) => TIMESTAMP_RE.test(row.timestamp))
+    .sort((left, right) => right.timestamp.localeCompare(left.timestamp));
+  if (!Number.isFinite(limit) || Number(limit) <= 0) return normalized;
+  return normalized.slice(0, Number(limit));
 }
 
 function archivePageUrl(url, timestamp) {
@@ -1784,63 +2178,97 @@ async function ensureWorkingDetailMedia(
   loadFieldsForTimestamp,
   detail,
 ) {
-  const records = [];
-  for (const timestamp of probeOrder) {
-    const record = await loadFieldsForTimestamp(timestamp);
-    if (record.notFound) continue;
-    records.push(record.fields);
-  }
-
   const imageValidationCache = new Map();
+  const fieldsByTimestamp = new Map();
+  const loadFields = async (timestamp) => {
+    if (fieldsByTimestamp.has(timestamp)) {
+      return fieldsByTimestamp.get(timestamp);
+    }
+    const record = await loadFieldsForTimestamp(timestamp);
+    const fields =
+      record && typeof record === "object" && !record.notFound
+        ? record.fields
+        : null;
+    fieldsByTimestamp.set(timestamp, fields);
+    return fields;
+  };
 
-  const iconCandidates = [
-    detail.icon,
-    detail.image,
-    ...records.flatMap((fields) => [fields.icon, fields.image]),
-  ];
-  const workingIcon = await resolveFirstWorkingImageUrl(
-    iconCandidates,
+  let workingIcon = await resolveFirstWorkingImageUrl(
+    [detail.icon, detail.image],
     `media:icon:${packageId}`,
     imageValidationCache,
   );
+  if (!workingIcon) {
+    for (const timestamp of probeOrder) {
+      const fields = await loadFields(timestamp);
+      if (!fields) continue;
+      workingIcon = await resolveFirstWorkingImageUrl(
+        [fields.icon, fields.image],
+        `media:icon:${packageId}`,
+        imageValidationCache,
+      );
+      if (workingIcon) break;
+    }
+  }
   if (workingIcon) {
     detail.icon = workingIcon;
-    if (isBlankText(detail.image)) detail.image = workingIcon;
+    detail.image = workingIcon;
   } else {
     detail.icon = "";
-    if (isBlankText(detail.image)) detail.image = "";
+    detail.image = "";
   }
 
-  const trailerImageCandidates = [
-    detail.trailerImage,
-    ...records.map((fields) => fields.trailerImage),
-  ];
-  const workingTrailerImage = await resolveFirstWorkingImageUrl(
-    trailerImageCandidates,
+  let workingTrailerImage = await resolveFirstWorkingImageUrl(
+    [detail.trailerImage],
     `media:trailer-image:${packageId}`,
     imageValidationCache,
   );
+  if (!workingTrailerImage) {
+    for (const timestamp of probeOrder) {
+      const fields = await loadFields(timestamp);
+      if (!fields) continue;
+      workingTrailerImage = await resolveFirstWorkingImageUrl(
+        [fields.trailerImage],
+        `media:trailer-image:${packageId}`,
+        imageValidationCache,
+      );
+      if (workingTrailerImage) break;
+    }
+  }
   detail.trailerImage = workingTrailerImage || "";
 
-  const screenshotCandidates = [
-    ...(Array.isArray(detail.screenshots) ? detail.screenshots : []),
-    ...records.flatMap((fields) =>
-      Array.isArray(fields.screenshots) ? fields.screenshots : [],
-    ),
-  ];
   const workingScreenshots = [];
   const used = new Set();
-  for (const candidate of screenshotCandidates) {
-    const resolved = await resolveFirstWorkingImageUrl(
-      [candidate],
-      `media:screenshot:${packageId}`,
-      imageValidationCache,
-    );
-    if (!resolved || used.has(resolved)) continue;
-    used.add(resolved);
-    workingScreenshots.push(resolved);
-    if (workingScreenshots.length >= 8) break;
+  const collectScreenshots = async (candidates) => {
+    for (const candidate of candidates ?? []) {
+      const resolved = await resolveFirstWorkingImageUrl(
+        [candidate],
+        `media:screenshot:${packageId}`,
+        imageValidationCache,
+      );
+      if (!resolved || used.has(resolved)) continue;
+      used.add(resolved);
+      workingScreenshots.push(resolved);
+      if (workingScreenshots.length >= 8) return true;
+    }
+    return false;
+  };
+
+  await collectScreenshots(
+    Array.isArray(detail.screenshots) ? detail.screenshots : [],
+  );
+
+  if (workingScreenshots.length < 8) {
+    for (const timestamp of probeOrder) {
+      const fields = await loadFields(timestamp);
+      if (!fields) continue;
+      const done = await collectScreenshots(
+        Array.isArray(fields.screenshots) ? fields.screenshots : [],
+      );
+      if (done) break;
+    }
   }
+
   detail.screenshots = workingScreenshots;
 }
 
@@ -2300,6 +2728,122 @@ function buildFallbackYears(candidate, years) {
 
 async function persistArchiveFallbackApp(candidate, detailRecord, year) {
   const loaded = await loadAppsFile(APPS_FILE);
+  const existingIndex = loaded.apps.findIndex(
+    (app) => String(app?.id ?? "").trim() === candidate.packageId,
+  );
+
+  if (existingIndex >= 0) {
+    const existing = loaded.apps[existingIndex];
+    const incoming = detailRecord.app ?? {};
+    const nextApp = { ...existing };
+    let changed = false;
+
+    const setIfChanged = (key, value) => {
+      if (value === undefined) return;
+      const prev = JSON.stringify(nextApp[key] ?? null);
+      const next = JSON.stringify(value ?? null);
+      if (prev === next) return;
+      nextApp[key] = value;
+      changed = true;
+    };
+
+    const incomingIcon = sanitizeMediaUrl(incoming.icon);
+    const incomingImage = sanitizeMediaUrl(incoming.image) || incomingIcon;
+    const incomingTrailerImage = sanitizeMediaUrl(incoming.trailerImage);
+    const incomingTrailerUrl = String(incoming.trailerUrl ?? "").trim();
+    const incomingContentRating = extractLeadingText(incoming.contentRating);
+    const incomingName = sanitizeLocaleText(incoming.name);
+    const incomingPublisher = sanitizeLocaleText(incoming.publisher);
+    const incomingPrice = isBlankText(incoming.price)
+      ? ""
+      : normalizeUsdPrice("", incoming.price);
+    const incomingUpdatedAt = cleanText(incoming.updatedAt);
+    const incomingSize = sanitizeLocaleText(incoming.size);
+    const incomingInstalls = sanitizeLocaleText(incoming.installs);
+    const incomingVersion = sanitizeLocaleText(incoming.version);
+    const incomingRequiresAndroid = sanitizeLocaleText(
+      incoming.requiresAndroid,
+    );
+    const incomingDescription = sanitizeLocaleBlocks(incoming.description);
+    const incomingWhatsNew = sanitizeLocaleBlocks(incoming.whatsNew);
+    const incomingRatingCountText = cleanText(incoming.ratingCountText);
+    const incomingScreenshots = sanitizeMediaList(
+      Array.isArray(incoming.screenshots) ? incoming.screenshots : [],
+    );
+
+    if (!isBlankText(incomingName)) setIfChanged("name", incomingName);
+    if (!isBlankText(incomingPublisher))
+      setIfChanged("publisher", incomingPublisher);
+    if (!isBlankText(incomingPrice)) setIfChanged("price", incomingPrice);
+    if (!isBlankText(incomingUpdatedAt))
+      setIfChanged("updatedAt", incomingUpdatedAt);
+    if (!isBlankText(incomingSize)) setIfChanged("size", incomingSize);
+    if (!isBlankText(incomingInstalls))
+      setIfChanged("installs", incomingInstalls);
+    if (!isBlankText(incomingVersion)) setIfChanged("version", incomingVersion);
+    if (!isBlankText(incomingRequiresAndroid)) {
+      setIfChanged("requiresAndroid", incomingRequiresAndroid);
+    }
+    if (incomingDescription.length > 0) {
+      setIfChanged("description", incomingDescription);
+    }
+    if (incomingWhatsNew.length > 0) {
+      setIfChanged("whatsNew", incomingWhatsNew);
+    }
+    if (
+      Number.isFinite(incoming.ratingValue) &&
+      !Number.isNaN(incoming.ratingValue)
+    ) {
+      setIfChanged("ratingValue", incoming.ratingValue);
+    }
+    if (!isBlankText(incomingRatingCountText)) {
+      setIfChanged("ratingCountText", incomingRatingCountText);
+    }
+    if (Number.isFinite(incoming.reviews) && incoming.reviews > 0) {
+      setIfChanged("reviews", incoming.reviews);
+    }
+
+    if (incomingIcon) setIfChanged("icon", incomingIcon);
+    if (incomingImage) setIfChanged("image", incomingImage);
+    if (
+      isBlankText(nextApp.image) &&
+      !isBlankText(nextApp.icon) &&
+      nextApp.image !== nextApp.icon
+    ) {
+      setIfChanged("image", nextApp.icon);
+    }
+    if (incomingTrailerImage)
+      setIfChanged("trailerImage", incomingTrailerImage);
+    if (!isBlankText(incomingTrailerUrl)) {
+      setIfChanged("trailerUrl", incomingTrailerUrl);
+    }
+    if (!isBlankText(incomingContentRating)) {
+      setIfChanged("contentRating", incomingContentRating);
+    }
+    if (incomingScreenshots.length > 0) {
+      setIfChanged("screenshots", incomingScreenshots);
+    }
+
+    if (!changed) {
+      return {
+        action: "exists",
+        total: loaded.apps.length,
+      };
+    }
+
+    const nextApps = [...loaded.apps];
+    nextApps[existingIndex] = nextApp;
+    await writeFile(APPS_FILE, serializeApps(nextApps), "utf8");
+
+    return {
+      action: "updated",
+      year,
+      total: nextApps.length,
+      detailTimestamp: detailRecord.timestamp,
+      pageUrl: detailRecord.pageUrl,
+    };
+  }
+
   if (loaded.byId.has(candidate.packageId)) {
     return {
       action: "exists",
@@ -2367,6 +2911,20 @@ async function importCandidateFromArchiveFallback(
           status: "exists",
           year,
           total: persisted.total,
+        };
+      }
+
+      if (persisted.action === "updated") {
+        logArchiveSync(
+          "fallback:updated",
+          `item=${itemRef} id=${candidate.packageId} year=${year} detailTs=${persisted.detailTimestamp} total=${persisted.total} elapsedMs=${elapsedMs(stepStartedAt)}`,
+        );
+        return {
+          status: "updated",
+          year,
+          total: persisted.total,
+          detailTimestamp: persisted.detailTimestamp,
+          pageUrl: persisted.pageUrl,
         };
       }
 
@@ -2537,6 +3095,16 @@ async function importSingleCandidate(
           missingApps,
         );
         action = "fallback-added";
+      } else if (fallback.status === "updated") {
+        summary.updated += 1;
+        summary.failed = Math.max(0, summary.failed - itemFailed);
+        summary.total = Number(fallback.total ?? summary.total);
+        await unmarkMissingApp(
+          candidate.packageId,
+          "fallback-updated",
+          missingApps,
+        );
+        action = "fallback-updated";
       } else if (fallback.status === "exists") {
         summary.failed = Math.max(0, summary.failed - itemFailed);
         summary.total = Number(fallback.total ?? summary.total);
@@ -2632,6 +3200,16 @@ async function fetchDetailRecord(packageId, preferredTimestamp, year) {
   const probeOrder = buildProbeOrder(rows, preferredTimestamp);
   const chosenTimestamp = probeOrder[0] ?? "";
   const newestTimestamp = chooseNewestTimestamp(rows);
+  let newestGlobalTimestamp = "";
+  try {
+    const newestGlobalRows = await fetchCdxRowsAllYears(detailsUrl, 1);
+    newestGlobalTimestamp = String(newestGlobalRows[0]?.timestamp ?? "");
+  } catch (error) {
+    logArchiveSync(
+      "snapshot:latest-skip",
+      `id=${packageId} year=${year} error=${error?.message ?? String(error)}`,
+    );
+  }
 
   if (!chosenTimestamp) {
     throw new Error(
@@ -2667,7 +3245,36 @@ async function fetchDetailRecord(packageId, preferredTimestamp, year) {
     );
   }
 
-  const mergedFields = { ...baseRecord.fields };
+  let preferredRecord = baseRecord;
+  let preferredLocaleScore = scoreDetailLocale(baseRecord.fields);
+  for (const timestamp of probeOrder) {
+    if (timestamp === chosenTimestamp) continue;
+    const record = await loadFieldsForTimestamp(timestamp);
+    if (record.notFound) continue;
+    const score = scoreDetailLocale(record.fields);
+    if (score > preferredLocaleScore) {
+      preferredRecord = record;
+      preferredLocaleScore = score;
+    }
+  }
+  if (preferredRecord.timestamp !== baseRecord.timestamp) {
+    logArchiveSync(
+      "locale:prefer",
+      `id=${packageId} year=${year} from=${baseRecord.timestamp} to=${preferredRecord.timestamp} score=${preferredLocaleScore.toFixed(2)}`,
+    );
+  }
+
+  const mergedFields = { ...preferredRecord.fields };
+  applyLocaleSafeTextFields(mergedFields, preferredRecord.fields);
+  let recordForOutput = preferredRecord;
+  let mediaProbeOrder = [...probeOrder];
+
+  if (
+    TIMESTAMP_RE.test(newestGlobalTimestamp) &&
+    !mediaProbeOrder.includes(newestGlobalTimestamp)
+  ) {
+    mediaProbeOrder = [newestGlobalTimestamp, ...mediaProbeOrder];
+  }
 
   if (newestTimestamp) {
     const newestRecord = await loadFieldsForTimestamp(newestTimestamp);
@@ -2676,8 +3283,29 @@ async function fetchDetailRecord(packageId, preferredTimestamp, year) {
     }
   }
 
+  if (TIMESTAMP_RE.test(newestGlobalTimestamp)) {
+    const newestGlobalRecord = await loadFieldsForTimestamp(
+      newestGlobalTimestamp,
+    );
+    if (!newestGlobalRecord.notFound) {
+      applyLatestMetrics(mergedFields, newestGlobalRecord.fields);
+      applyLocaleSafeTextFields(mergedFields, newestGlobalRecord.fields);
+      fillMissingMedia(mergedFields, newestGlobalRecord.fields);
+      recordForOutput = newestGlobalRecord;
+      const globalScore = scoreDetailLocale(newestGlobalRecord.fields);
+      if (globalScore > preferredLocaleScore) {
+        preferredLocaleScore = globalScore;
+        preferredRecord = newestGlobalRecord;
+      }
+      logArchiveSync(
+        "snapshot:latest",
+        `id=${packageId} year=${year} ts=${newestGlobalRecord.timestamp}`,
+      );
+    }
+  }
+
   if (hasMediaGaps(mergedFields)) {
-    for (const timestamp of probeOrder) {
+    for (const timestamp of mediaProbeOrder) {
       const record = await loadFieldsForTimestamp(timestamp);
       if (record.notFound) continue;
       fillMissingMedia(mergedFields, record.fields);
@@ -2689,28 +3317,125 @@ async function fetchDetailRecord(packageId, preferredTimestamp, year) {
     mergedFields.image = mergedFields.icon;
   }
 
-  try {
-    await withTimeout(
-      ensureWorkingDetailMedia(
-        packageId,
-        probeOrder,
-        loadFieldsForTimestamp,
-        mergedFields,
-      ),
-      DEFAULT_MEDIA_VALIDATE_TIMEOUT_MS,
-      `detail-media:${packageId}:${year}`,
-    );
-  } catch (error) {
-    logArchiveSync(
-      "media:skip",
-      `id=${packageId} year=${year} error=${error?.message ?? String(error)}`,
+  const runMediaValidation = async (order, stage) => {
+    try {
+      await withTimeout(
+        ensureWorkingDetailMedia(
+          packageId,
+          order,
+          loadFieldsForTimestamp,
+          mergedFields,
+        ),
+        DEFAULT_MEDIA_VALIDATE_TIMEOUT_MS,
+        `detail-media:${packageId}:${year}:${stage}`,
+      );
+      return true;
+    } catch (error) {
+      logArchiveSync(
+        "media:skip",
+        `id=${packageId} year=${year} stage=${stage} error=${error?.message ?? String(error)}`,
+      );
+      return false;
+    }
+  };
+
+  let mediaValidated = await runMediaValidation(mediaProbeOrder, "primary");
+
+  const localeNeedsExpansion = detailHasDisallowedLocale(mergedFields);
+  if (!mediaValidated || hasMediaGaps(mergedFields) || localeNeedsExpansion) {
+    try {
+      const fallbackRows = await fetchCdxRowsAllYears(
+        detailsUrl,
+        DEFAULT_MEDIA_FALLBACK_PROBE_LIMIT * 2,
+      );
+      const existing = new Set(mediaProbeOrder);
+      const extraTimestamps = [];
+      for (const row of fallbackRows) {
+        const timestamp = String(row?.timestamp ?? "");
+        if (!TIMESTAMP_RE.test(timestamp) || existing.has(timestamp)) continue;
+        existing.add(timestamp);
+        extraTimestamps.push(timestamp);
+        if (extraTimestamps.length >= DEFAULT_MEDIA_FALLBACK_PROBE_LIMIT) break;
+      }
+
+      if (extraTimestamps.length > 0) {
+        mediaProbeOrder = [...mediaProbeOrder, ...extraTimestamps];
+        logArchiveSync(
+          "media:expand",
+          `id=${packageId} year=${year} added=${extraTimestamps.length} total=${mediaProbeOrder.length}`,
+        );
+
+        let localeImproved = false;
+        for (const timestamp of extraTimestamps) {
+          const record = await loadFieldsForTimestamp(timestamp);
+          if (record.notFound) continue;
+
+          const score = scoreDetailLocale(record.fields);
+          if (score > preferredLocaleScore) {
+            preferredLocaleScore = score;
+            preferredRecord = record;
+            recordForOutput = record;
+            applyLocaleSafeTextFields(mergedFields, record.fields);
+            localeImproved = true;
+          }
+
+          if (hasMediaGaps(mergedFields)) {
+            fillMissingMedia(mergedFields, record.fields);
+          }
+        }
+        if (localeImproved) {
+          logArchiveSync(
+            "locale:expand",
+            `id=${packageId} year=${year} ts=${preferredRecord.timestamp} score=${preferredLocaleScore.toFixed(2)}`,
+          );
+        }
+
+        const fallbackValidated = await runMediaValidation(
+          mediaProbeOrder,
+          "fallback",
+        );
+        mediaValidated = mediaValidated || fallbackValidated;
+      }
+    } catch (error) {
+      logArchiveSync(
+        "media:expand-skip",
+        `id=${packageId} year=${year} error=${error?.message ?? String(error)}`,
+      );
+    }
+  }
+
+  const localeSafeFields = sanitizeDetailLocaleFields(mergedFields);
+  if (isBlankText(localeSafeFields.name)) {
+    localeSafeFields.name = sanitizeLocaleText(mergedFields.name);
+  }
+  if (isBlankText(localeSafeFields.publisher)) {
+    localeSafeFields.publisher = sanitizeLocaleText(mergedFields.publisher);
+  }
+  const latestSnapshotTimestamp = [...fieldCache.values()]
+    .filter(
+      (record) =>
+        record &&
+        !record.notFound &&
+        TIMESTAMP_RE.test(String(record.timestamp ?? "")),
+    )
+    .map((record) => String(record.timestamp))
+    .sort((left, right) => right.localeCompare(left))[0];
+  localeSafeFields.updatedAt = toIsoDateFromTimestamp(
+    latestSnapshotTimestamp || recordForOutput.timestamp,
+  );
+  if (
+    isBlankText(localeSafeFields.name) ||
+    isBlankText(localeSafeFields.publisher)
+  ) {
+    throw new Error(
+      `locale-filter: missing required RU/ENG fields package=${packageId} year=${year}`,
     );
   }
 
   return {
-    timestamp: baseRecord.timestamp,
-    pageUrl: baseRecord.pageUrl,
-    app: buildAppRecord(packageId, mergedFields, baseRecord.timestamp),
+    timestamp: recordForOutput.timestamp,
+    pageUrl: recordForOutput.pageUrl,
+    app: buildAppRecord(packageId, localeSafeFields, recordForOutput.timestamp),
   };
 }
 
@@ -2755,12 +3480,14 @@ async function main() {
           `source=manual id=${candidate.packageId}`,
         );
       }
-      if (existingIds.has(candidate.packageId)) continue;
-      existingIds.add(candidate.packageId);
+      const alreadyPresent = existingIds.has(candidate.packageId);
+      if (!alreadyPresent) {
+        existingIds.add(candidate.packageId);
+      }
       selectedCandidates.push(candidate);
       logArchiveSync(
         "discover:add",
-        `source=manual id=${candidate.packageId} firstSeenYear=${candidate.firstSeenYear} selected=${selectedCandidates.length}`,
+        `source=manual id=${candidate.packageId} firstSeenYear=${candidate.firstSeenYear} selected=${selectedCandidates.length} mode=${alreadyPresent ? "refresh" : "new"}`,
       );
     }
   } else {

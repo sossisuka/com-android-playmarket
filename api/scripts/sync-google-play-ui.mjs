@@ -356,6 +356,13 @@ function pageHtml() {
             placeholder="Limit pages, e.g. 100"
             style="max-width: 220px; min-height: 36px; resize: none;"
           />
+          <input
+            id="archivePackageInput"
+            class="input"
+            type="text"
+            placeholder="Package id, e.g. com.rovio.angrybirdsspace.premium"
+            style="max-width: 360px; min-height: 36px; resize: none;"
+          />
         </div>
       </div>
 
@@ -415,6 +422,7 @@ function pageHtml() {
     const archiveLimitAppsInput = document.getElementById("archiveLimitAppsInput");
     const archiveSnapshotConcurrencyInput = document.getElementById("archiveSnapshotConcurrencyInput");
     const archiveLimitPagesInput = document.getElementById("archiveLimitPagesInput");
+    const archivePackageInput = document.getElementById("archivePackageInput");
 
     const MAX_IDS_IN_DOM = 100;
     const MAX_LOG_ROWS = 400;
@@ -542,6 +550,7 @@ function pageHtml() {
         archiveSnapshotConcurrencyInput?.value,
       );
       const limitPages = parsePositiveField(archiveLimitPagesInput?.value);
+      const packageId = String(archivePackageInput?.value ?? "").trim();
 
       if (fromYear && toYear && fromYear > toYear) {
         setStatus("Проверьте период: from year не должен быть больше to year");
@@ -556,6 +565,7 @@ function pageHtml() {
         argsParts.push("--snapshot-concurrency=" + snapshotConcurrency);
       }
       if (limitPages) argsParts.push("--limit-pages=" + limitPages);
+      if (packageId) argsParts.push("--package=" + packageId);
 
       const archiveArgs = argsParts.join(" ");
       const response = await postJson("/run-script", {
