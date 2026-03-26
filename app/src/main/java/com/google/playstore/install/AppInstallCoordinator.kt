@@ -284,7 +284,9 @@ internal class AppInstallCoordinator(
     }
 
     private fun clearPendingFiles() {
-        // Keep APK cache for retries to avoid duplicate downloads.
+        pendingApkCachePath?.let { cachedPath ->
+            runCatching { File(cachedPath).delete() }
+        }
         pendingLegacyInstallPath?.let { cachedPath ->
             runCatching { File(cachedPath).delete() }
         }
@@ -347,21 +349,6 @@ internal class AppInstallCoordinator(
             apkCacheDir.mkdirs()
         }
         val apkCacheFile = File(apkCacheDir, "$packageId.apk")
-
-        val cached = if (apkCacheFile.exists() && apkCacheFile.isFile) {
-            parsePreparedApk(apkCacheFile)
-        } else {
-            null
-        }
-        if (
-            cached != null &&
-            cached.parsedPackageName.equals(packageId, ignoreCase = true) &&
-            isAbiCompatible(cached.nativeAbis)
-        ) {
-            val size = apkCacheFile.length().coerceAtLeast(0L)
-            onProgress(size, size)
-            return cached
-        }
 
         if (apkCacheFile.exists()) {
             runCatching { apkCacheFile.delete() }
