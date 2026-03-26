@@ -35,6 +35,7 @@ internal class AppInstallCoordinator(
     private val appContext = context.applicationContext
     private val packageManager = appContext.packageManager
     private val apkInstallDispatcher = createApkInstallDispatcher(appContext)
+    private val apkCacheDir = File(appContext.cacheDir, "apk-installer")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val _state = MutableStateFlow<InstallSessionState?>(null)
     private val _events = MutableSharedFlow<InstallSessionEvent>(extraBufferCapacity = 8)
@@ -47,6 +48,20 @@ internal class AppInstallCoordinator(
     val events: SharedFlow<InstallSessionEvent> = _events.asSharedFlow()
 
     fun start(app: StoreApp) {
+        val activeSession = _state.value
+        if (
+            activeSession != null &&
+            activeSession.packageId.equals(app.id, ignoreCase = true) &&
+            activeSession.errorMessage.isNullOrBlank() &&
+            activeSession.stage in setOf(
+                INSTALL_STAGE_PREPARING,
+                INSTALL_STAGE_DOWNLOADING,
+                INSTALL_STAGE_INSTALLING
+            )
+        ) {
+            return
+        }
+
         val requiredUnknownSources = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !appContext.packageManager.canRequestPackageInstalls()
         if (requiredUnknownSources) {
@@ -81,17 +96,9 @@ internal class AppInstallCoordinator(
                 ) ?: return@launch
             )
 
-            val apkCacheDir = File(appContext.cacheDir, "apk-installer")
-            val apkCacheFile = File(apkCacheDir, "${app.id}.apk")
-            val downloadedFile = runCatching {
+            val preparedApk = runCatching {
                 withContext(Dispatchers.IO) {
-                    if (!apkCacheDir.exists()) {
-                        apkCacheDir.mkdirs()
-                    }
-                    if (apkCacheFile.exists()) {
-                        apkCacheFile.delete()
-                    }
-                    apiClient.downloadApkToFile(app.id, apkCacheFile) { downloadedBytes, totalBytes ->
+                    resolveApkForInstall(app.id) { downloadedBytes, totalBytes ->
                         scope.launch {
                             updateState(
                                 currentState()?.copy(
@@ -107,7 +114,6 @@ internal class AppInstallCoordinator(
                             )
                         }
                     }
-                    apkCacheFile
                 }
             }.getOrElse { failure ->
                 fail(
@@ -117,9 +123,9 @@ internal class AppInstallCoordinator(
                         failure.message?.takeIf(String::isNotBlank) ?: "unknown error"
                     )
                 )
-                runCatching { apkCacheFile.delete() }
                 return@launch
             }
+            val downloadedFile = preparedApk.file
 
             val apkUri = runCatching {
                 FileProvider.getUriForFile(
@@ -137,9 +143,7 @@ internal class AppInstallCoordinator(
             pendingApkCachePath = downloadedFile.absolutePath
             pendingLegacyInstallPath = legacyInstallPath
 
-            val parsedPackageName = runCatching {
-                packageManager.getPackageArchiveInfo(downloadedFile.absolutePath, 0)?.packageName
-            }.getOrNull()
+            val parsedPackageName = preparedApk.parsedPackageName
             if (parsedPackageName.isNullOrBlank()) {
                 fail(app, appContext.getString(R.string.install_invalid_apk))
                 runCatching { downloadedFile.delete() }
@@ -154,9 +158,7 @@ internal class AppInstallCoordinator(
                 return@launch
             }
 
-            val apkNativeAbis = readApkNativeAbis(downloadedFile.absolutePath)
-            val deviceAbis = Build.SUPPORTED_ABIS.toSet()
-            if (apkNativeAbis.isNotEmpty() && apkNativeAbis.intersect(deviceAbis).isEmpty()) {
+            if (!isAbiCompatible(preparedApk.nativeAbis)) {
                 _events.tryEmit(InstallSessionEvent.AbiIncompatible(app.id))
                 fail(app, appContext.getString(R.string.install_failed_cpu_abi_incompatible))
                 runCatching { downloadedFile.delete() }
@@ -282,9 +284,7 @@ internal class AppInstallCoordinator(
     }
 
     private fun clearPendingFiles() {
-        pendingApkCachePath?.let { cachedPath ->
-            runCatching { File(cachedPath).delete() }
-        }
+        // Keep APK cache for retries to avoid duplicate downloads.
         pendingLegacyInstallPath?.let { cachedPath ->
             runCatching { File(cachedPath).delete() }
         }
@@ -331,6 +331,64 @@ internal class AppInstallCoordinator(
                     .toSet()
             }
         }.getOrDefault(emptySet())
+    }
+
+    private data class PreparedApk(
+        val file: File,
+        val parsedPackageName: String,
+        val nativeAbis: Set<String>
+    )
+
+    private suspend fun resolveApkForInstall(
+        packageId: String,
+        onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit
+    ): PreparedApk {
+        if (!apkCacheDir.exists()) {
+            apkCacheDir.mkdirs()
+        }
+        val apkCacheFile = File(apkCacheDir, "$packageId.apk")
+
+        val cached = if (apkCacheFile.exists() && apkCacheFile.isFile) {
+            parsePreparedApk(apkCacheFile)
+        } else {
+            null
+        }
+        if (
+            cached != null &&
+            cached.parsedPackageName.equals(packageId, ignoreCase = true) &&
+            isAbiCompatible(cached.nativeAbis)
+        ) {
+            val size = apkCacheFile.length().coerceAtLeast(0L)
+            onProgress(size, size)
+            return cached
+        }
+
+        if (apkCacheFile.exists()) {
+            runCatching { apkCacheFile.delete() }
+        }
+
+        apiClient.downloadApkToFile(packageId, apkCacheFile, onProgress)
+        return parsePreparedApk(apkCacheFile)
+            ?: throw IllegalStateException("Downloaded APK is invalid")
+    }
+
+    private fun parsePreparedApk(file: File): PreparedApk? {
+        if (!file.exists() || !file.isFile) return null
+        val parsedPackageName = runCatching {
+            packageManager.getPackageArchiveInfo(file.absolutePath, 0)?.packageName
+        }.getOrNull()?.trim().orEmpty()
+        if (parsedPackageName.isBlank()) return null
+        return PreparedApk(
+            file = file,
+            parsedPackageName = parsedPackageName,
+            nativeAbis = readApkNativeAbis(file.absolutePath)
+        )
+    }
+
+    private fun isAbiCompatible(apkNativeAbis: Set<String>): Boolean {
+        if (apkNativeAbis.isEmpty()) return true
+        val deviceAbis = Build.SUPPORTED_ABIS.toSet()
+        return apkNativeAbis.intersect(deviceAbis).isNotEmpty()
     }
 
     private companion object {

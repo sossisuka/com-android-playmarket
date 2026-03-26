@@ -21,15 +21,25 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.Charset
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 import org.json.JSONArray
 import org.json.JSONObject
 
 class PlayApiClient(private val baseUrl: String) {
+    private data class ApkDownloadGuard(
+        val monitor: Any = Any(),
+        val refs: AtomicInteger = AtomicInteger(0)
+    )
+
     private companion object {
         private const val TAG = "PlayApiClient"
+        private val apkDownloadGuards = ConcurrentHashMap<String, ApkDownloadGuard>()
     }
     fun register(
         email: String,
@@ -217,43 +227,46 @@ class PlayApiClient(private val baseUrl: String) {
         destinationFile: File,
         onProgress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null
     ) {
-        val encodedId = encodeUrlPart(packageId)
-        val url = URL(baseUrl.trimEnd('/') + "/apk/$encodedId")
-        val attempts = listOf(
-            20_000 to 90_000,
-            30_000 to 240_000
-        )
+        val normalizedPackageId = packageId.trim()
+        withApkDownloadLock(normalizedPackageId) {
+            val encodedId = encodeUrlPart(normalizedPackageId)
+            val url = URL(baseUrl.trimEnd('/') + "/apk/$encodedId")
+            val attempts = listOf(
+                20_000 to 90_000,
+                30_000 to 240_000
+            )
 
-        var lastError: Throwable? = null
-        for ((index, attempt) in attempts.withIndex()) {
-            val (connectTimeoutMs, readTimeoutMs) = attempt
-            runCatching {
-                downloadApkAttempt(
-                    url = url,
-                    destinationFile = destinationFile,
-                    connectTimeoutMs = connectTimeoutMs,
-                    readTimeoutMs = readTimeoutMs,
-                    onProgress = onProgress
-                )
-            }.onSuccess {
-                return
-            }.onFailure { failure ->
-                lastError = failure
-                Log.w(
-                    TAG,
-                    "APK download attempt ${index + 1}/${attempts.size} failed for $packageId: ${failure.message}",
-                    failure
-                )
-                runCatching { destinationFile.delete() }
-                if (index < attempts.lastIndex) {
-                    onProgress?.invoke(0L, -1L)
+            var lastError: Throwable? = null
+            for ((index, attempt) in attempts.withIndex()) {
+                val (connectTimeoutMs, readTimeoutMs) = attempt
+                runCatching {
+                    downloadApkAttempt(
+                        url = url,
+                        destinationFile = destinationFile,
+                        connectTimeoutMs = connectTimeoutMs,
+                        readTimeoutMs = readTimeoutMs,
+                        onProgress = onProgress
+                    )
+                }.onSuccess {
+                    return@withApkDownloadLock
+                }.onFailure { failure ->
+                    lastError = failure
+                    Log.w(
+                        TAG,
+                        "APK download attempt ${index + 1}/${attempts.size} failed for $normalizedPackageId: ${failure.message}",
+                        failure
+                    )
+                    runCatching { destinationFile.delete() }
+                    if (index < attempts.lastIndex) {
+                        onProgress?.invoke(0L, -1L)
+                    }
                 }
             }
-        }
 
-        val message = lastError?.message?.takeIf { it.isNotBlank() } ?: "unknown error"
-        Log.e(TAG, "APK download failed after retries for $packageId: $message", lastError)
-        throw IOException("APK download failed after retries: $message", lastError)
+            val message = lastError?.message?.takeIf { it.isNotBlank() } ?: "unknown error"
+            Log.e(TAG, "APK download failed after retries for $normalizedPackageId: $message", lastError)
+            throw IOException("APK download failed after retries: $message", lastError)
+        }
     }
 
     private fun downloadApkAttempt(
@@ -289,37 +302,48 @@ class PlayApiClient(private val baseUrl: String) {
             val totalBytes = contentLengthCompat(connection)
             onProgress?.invoke(0L, totalBytes)
             destinationFile.parentFile?.mkdirs()
+            val tempFile = File(
+                destinationFile.parentFile,
+                "${destinationFile.name}.tmp-${System.nanoTime()}"
+            )
             connection.inputStream.use { input ->
-                destinationFile.outputStream().use { output ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    var downloaded = 0L
-                    var read = input.read(buffer)
-                    var lastReportedPercent = -1
+                runCatching { tempFile.delete() }
+                try {
+                    tempFile.outputStream().use { output ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        var downloaded = 0L
+                        var read = input.read(buffer)
+                        var lastReportedPercent = -1
 
-                    while (read >= 0) {
-                        if (read > 0) {
-                            output.write(buffer, 0, read)
-                            downloaded += read
-                            if (onProgress != null) {
-                                if (totalBytes > 0) {
-                                    val percent = ((downloaded * 100L) / totalBytes)
-                                        .toInt()
-                                        .coerceIn(0, 100)
-                                    if (percent != lastReportedPercent) {
-                                        lastReportedPercent = percent
+                        while (read >= 0) {
+                            if (read > 0) {
+                                output.write(buffer, 0, read)
+                                downloaded += read
+                                if (onProgress != null) {
+                                    if (totalBytes > 0) {
+                                        val percent = ((downloaded * 100L) / totalBytes)
+                                            .toInt()
+                                            .coerceIn(0, 100)
+                                        if (percent != lastReportedPercent) {
+                                            lastReportedPercent = percent
+                                            onProgress(downloaded, totalBytes)
+                                        }
+                                    } else {
                                         onProgress(downloaded, totalBytes)
                                     }
-                                } else {
-                                    onProgress(downloaded, totalBytes)
                                 }
                             }
+                            read = input.read(buffer)
                         }
-                        read = input.read(buffer)
-                    }
 
-                    if (onProgress != null && totalBytes > 0 && lastReportedPercent < 100) {
-                        onProgress(downloaded, totalBytes)
+                        if (onProgress != null && totalBytes > 0 && lastReportedPercent < 100) {
+                            onProgress(downloaded, totalBytes)
+                        }
                     }
+                    replaceFileAtomically(tempFile, destinationFile)
+                } catch (error: Throwable) {
+                    runCatching { tempFile.delete() }
+                    throw error
                 }
             }
         } finally {
@@ -334,6 +358,47 @@ class PlayApiClient(private val baseUrl: String) {
             connection.contentLength.toLong()
         }
         return value.takeIf { it > 0L } ?: -1L
+    }
+
+    private fun withApkDownloadLock(packageId: String, action: () -> Unit) {
+        val key = packageId.lowercase(Locale.US)
+        val guard = apkDownloadGuards.compute(key) { _, existing ->
+            val active = existing ?: ApkDownloadGuard()
+            active.refs.incrementAndGet()
+            active
+        } ?: ApkDownloadGuard().also { it.refs.incrementAndGet() }
+        try {
+            synchronized(guard.monitor) {
+                action()
+            }
+        } finally {
+            apkDownloadGuards.computeIfPresent(key) { _, existing ->
+                if (existing !== guard) return@computeIfPresent existing
+                val left = existing.refs.decrementAndGet()
+                if (left <= 0) null else existing
+            }
+        }
+    }
+
+    private fun replaceFileAtomically(tempFile: File, destinationFile: File) {
+        destinationFile.parentFile?.mkdirs()
+        val tempPath = tempFile.toPath()
+        val destinationPath = destinationFile.toPath()
+        val atomicMove = runCatching {
+            Files.move(
+                tempPath,
+                destinationPath,
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        }
+        if (atomicMove.isFailure) {
+            Files.move(
+                tempPath,
+                destinationPath,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        }
     }
 
     fun readHome(mode: String): HomePayload {

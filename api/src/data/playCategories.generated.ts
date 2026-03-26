@@ -1,7 +1,7 @@
 export type PlayCategory = { id: string; label: string };
 
 // AUTO-GENERATED FILE. DO NOT EDIT BY HAND.
-// Generated at: 2026-03-25T04:19:51.172Z
+// Generated at: 2026-03-26T03:20:32.831Z
 
 export const generatedPlayCategories: PlayCategory[] = [
   {
@@ -29,6 +29,10 @@ export const generatedPlayCategories: PlayCategory[] = [
     "label": "Communication"
   },
   {
+    "id": "DATING",
+    "label": "Dating"
+  },
+  {
     "id": "EDUCATION",
     "label": "Education"
   },
@@ -43,10 +47,6 @@ export const generatedPlayCategories: PlayCategory[] = [
   {
     "id": "FOOD_AND_DRINK",
     "label": "Food & Drink"
-  },
-  {
-    "id": "GAME",
-    "label": "Game"
   },
   {
     "id": "GAME_ACTION",
@@ -85,10 +85,6 @@ export const generatedPlayCategories: PlayCategory[] = [
     "label": "Game Educational"
   },
   {
-    "id": "GAME_FAMILY",
-    "label": "Game Family"
-  },
-  {
     "id": "GAME_MUSIC",
     "label": "Game Music"
   },
@@ -121,10 +117,6 @@ export const generatedPlayCategories: PlayCategory[] = [
     "label": "Game Strategy"
   },
   {
-    "id": "GAME_WORD",
-    "label": "Game Word"
-  },
-  {
     "id": "HEALTH_AND_FITNESS",
     "label": "Health & Fitness"
   },
@@ -135,10 +127,6 @@ export const generatedPlayCategories: PlayCategory[] = [
   {
     "id": "LIFESTYLE",
     "label": "Lifestyle"
-  },
-  {
-    "id": "MAPS_AND_NAVIGATION",
-    "label": "Maps & Navigation"
   },
   {
     "id": "MEDIA_AND_VIDEO",

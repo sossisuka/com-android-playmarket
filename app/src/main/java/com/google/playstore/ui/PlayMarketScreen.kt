@@ -2729,31 +2729,22 @@ private fun AppDetailsPage(
     }
     val trailerImage = app.trailerImageUrl.trim()
     val hasTrailer = trailerImage.isNotBlank()
-    val mediaItems = remember(app.id, trailerImage, screenshotImages) {
-        buildList {
-            if (trailerImage.isNotBlank()) add(trailerImage to true)
-            screenshotImages
-                .filterNot { it == trailerImage }
-                .forEach { add(it to false) }
-        }
+    val screenshotsOnly = remember(screenshotImages, trailerImage) {
+        screenshotImages.filterNot { it == trailerImage }
     }
-    val mediaImages = remember(mediaItems) { mediaItems.map { it.first } }
-    val infiniteScreenshots = mediaItems.size > 1
+    val infiniteScreenshots = screenshotsOnly.size > 1
     val infiniteScreenshotsVirtualCount = 1_000_000
     val screenshotsVirtualCount = if (infiniteScreenshots) {
         infiniteScreenshotsVirtualCount
     } else {
-        mediaItems.size
+        screenshotsOnly.size
     }
-    val screenshotsStartIndex = remember(mediaItems.size, hasTrailer, screenshotsVirtualCount) {
-        if (!infiniteScreenshots) {
-            0
-        } else if (hasTrailer) {
-            // Keep trailer visible at the beginning when it exists.
+    val screenshotsStartIndex = remember(screenshotsOnly.size, hasTrailer, screenshotsVirtualCount) {
+        if (hasTrailer || !infiniteScreenshots) {
             0
         } else {
             val middle = screenshotsVirtualCount / 2
-            val alignedMiddle = middle - (middle % mediaItems.size)
+            val alignedMiddle = middle - (middle % screenshotsOnly.size)
             alignedMiddle
         }
     }
@@ -2874,10 +2865,10 @@ private fun AppDetailsPage(
         )
     }
     val openShotIndex = fullscreenShotIndex
-    if (openShotIndex != null && mediaImages.isNotEmpty()) {
+    if (openShotIndex != null && screenshotsOnly.isNotEmpty()) {
         FullscreenScreenshotViewer(
-            images = mediaImages,
-            initialIndex = openShotIndex.coerceIn(0, mediaImages.lastIndex),
+            images = screenshotsOnly,
+            initialIndex = openShotIndex.coerceIn(0, screenshotsOnly.lastIndex),
             onDismiss = { fullscreenShotIndex = null }
         )
     }
@@ -3094,25 +3085,36 @@ private fun AppDetailsPage(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         contentPadding = PaddingValues(horizontal = 10.dp)
                     ) {
+                        if (hasTrailer) {
+                            item {
+                                AdaptiveMediaCard(
+                                    imageUrl = trailerImage,
+                                    height = 180.dp,
+                                    defaultRatio = 1.34f,
+                                    minRatio = 0.52f,
+                                    maxRatio = 1.85f,
+                                    onClick = {
+                                        if (app.trailerUrl.isNotBlank()) {
+                                            uriHandler.openUri(app.trailerUrl)
+                                        }
+                                    },
+                                    showPlay = app.trailerUrl.isNotBlank()
+                                )
+                            }
+                        }
                         items(count = screenshotsVirtualCount) { index ->
-                            val mediaIndex = if (mediaItems.isEmpty()) 0 else index % mediaItems.size
-                            val media = mediaItems.getOrNull(mediaIndex) ?: return@items
-                            val imageUrl = media.first
-                            val isTrailerImage = media.second
+                            val screenshotIndex = if (screenshotsOnly.isEmpty()) 0 else index % screenshotsOnly.size
+                            val imageUrl = screenshotsOnly.getOrNull(screenshotIndex) ?: return@items
                             AdaptiveMediaCard(
                                 imageUrl = imageUrl,
                                 height = 180.dp,
-                                defaultRatio = if (isTrailerImage) 1.34f else 0.58f,
+                                defaultRatio = 0.58f,
                                 minRatio = 0.52f,
                                 maxRatio = 1.85f,
                                 onClick = {
-                                    if (isTrailerImage && app.trailerUrl.isNotBlank()) {
-                                        uriHandler.openUri(app.trailerUrl)
-                                    } else {
-                                        fullscreenShotIndex = mediaIndex
-                                    }
+                                    fullscreenShotIndex = screenshotIndex
                                 },
-                                showPlay = isTrailerImage && app.trailerUrl.isNotBlank()
+                                showPlay = false
                             )
                         }
                     }
@@ -3263,7 +3265,7 @@ private fun HeaderDownloadProgressPanel(
         isInstalling -> ""
         actualProgress < 0 -> tr("Ожидание", "Waiting")
         total != null -> "$actualProgress%"
-        else -> tr("Загрузка", "Downloading")
+        else -> tr("Ожидание загрузки...", "Waiting for download...")
     }
     val overlapCompensation = if (barTrailingOverlap > 0.dp) barTrailingOverlap / 2 else 0.dp
     Column(
