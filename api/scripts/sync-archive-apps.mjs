@@ -268,6 +268,21 @@ const MONTHS = new Map([
   ["dezembro", 12],
   ["grudnia", 12],
 ]);
+const SIMILAR_CLUSTER_HEADINGS = new Set([
+  "similar",
+  "similar apps",
+  "similar content",
+  "vergelijkbaar",
+  "related apps",
+  "related content",
+  "類似內容",
+  "类似内容",
+  "類似应用",
+  "類似應用",
+  "類似アプリ",
+  "похожие приложения",
+  "схожие приложения",
+]);
 
 function normalizePackageIds(values) {
   if (!Array.isArray(values)) return [];
@@ -279,6 +294,24 @@ function normalizePackageIds(values) {
         .filter((item) => PACKAGE_ID_RE.test(item)),
     ),
   ].sort((left, right) => left.localeCompare(right));
+}
+
+function sanitizeRelationIds(values, currentPackageId = "", limit = 3) {
+  const seen = new Set();
+  const currentId = String(currentPackageId ?? "").trim();
+  if (PACKAGE_ID_RE.test(currentId)) {
+    seen.add(currentId);
+  }
+
+  const normalized = [];
+  for (const value of values ?? []) {
+    const packageId = String(value ?? "").trim();
+    if (!PACKAGE_ID_RE.test(packageId) || seen.has(packageId)) continue;
+    seen.add(packageId);
+    normalized.push(packageId);
+    if (normalized.length >= limit) break;
+  }
+  return normalized;
 }
 
 function parsePackageIdsInput(rawValue, label = "--packages") {
@@ -578,6 +611,35 @@ function findMatchingArrayEnd(text, startIndex) {
       depth -= 1;
       if (depth === 0) return index;
     }
+  }
+
+  return -1;
+}
+
+function findMatchingTagEnd(text, startIndex, tagName) {
+  const source = String(text ?? "");
+  if (!source || startIndex < 0) return -1;
+
+  const tokenRe = new RegExp(`<${tagName}\\b[^>]*>|</${tagName}>`, "gi");
+  tokenRe.lastIndex = startIndex;
+
+  let depth = 0;
+  let match;
+  while ((match = tokenRe.exec(source))) {
+    const token = match[0] ?? "";
+    const index = match.index ?? -1;
+    if (index < startIndex) continue;
+
+    if (/^<\//.test(token)) {
+      if (depth <= 0) continue;
+      depth -= 1;
+      if (depth === 0) {
+        return index + token.length;
+      }
+      continue;
+    }
+
+    depth += 1;
   }
 
   return -1;
@@ -1508,24 +1570,104 @@ function extractMetadataMap(html) {
   return metadata;
 }
 
-function extractPagePackageIds(html) {
-  const ids = new Set();
+function extractOrderedPackageIds(html, excludedIds = []) {
+  const seen = new Set(
+    excludedIds
+      .map((item) => String(item ?? "").trim())
+      .filter((item) => PACKAGE_ID_RE.test(item)),
+  );
+  const ids = [];
+  const push = (rawValue) => {
+    const packageId = decodeAttribute(rawValue);
+    if (!PACKAGE_ID_RE.test(packageId) || seen.has(packageId)) return;
+    seen.add(packageId);
+    ids.push(packageId);
+  };
 
   for (const match of html.matchAll(/data-docid="([^"]+)"/gi)) {
-    const packageId = decodeAttribute(match[1]);
-    if (PACKAGE_ID_RE.test(packageId)) {
-      ids.add(packageId);
-    }
+    push(match[1]);
   }
 
   for (const match of html.matchAll(/details\?id=([^"&<\s]+)(?:&amp;|&|")/gi)) {
-    const packageId = decodeAttribute(match[1]);
-    if (PACKAGE_ID_RE.test(packageId)) {
-      ids.add(packageId);
+    push(match[1]);
+  }
+
+  return ids;
+}
+
+function extractPagePackageIds(html) {
+  return extractOrderedPackageIds(html);
+}
+
+function isSimilarClusterHeading(value) {
+  const normalized = normalizeDateToken(cleanText(value));
+  if (!normalized) return false;
+  if (SIMILAR_CLUSTER_HEADINGS.has(normalized)) return true;
+  return /^(?:similar|related)(?:\s+(?:apps?|content))?$/.test(normalized);
+}
+
+function isSimilarClusterLink(value) {
+  const href = decodeAttribute(value);
+  if (!href) return false;
+  return (
+    /\/store\/apps\/similar\?/i.test(href) ||
+    /\/store\/apps\/collection\/similar_apps_/i.test(href) ||
+    /\bsimilar_apps_/i.test(href)
+  );
+}
+
+function extractSimilarPackageIds(html, currentPackageId = "") {
+  const ids = [];
+  const seen = new Set();
+  const currentId = String(currentPackageId ?? "").trim();
+  if (PACKAGE_ID_RE.test(currentId)) {
+    seen.add(currentId);
+  }
+
+  const clusterPatterns = [
+    /<div\b[^>]*class="[^"]*\brec-cluster\b[^"]*"[^>]*>/gi,
+    /<div\b[^>]*class="[^"]*\buTDLzc\b[^"]*\bdrrice\b[^"]*"[^>]*>/gi,
+  ];
+  for (const clusterRe of clusterPatterns) {
+    for (const match of html.matchAll(clusterRe)) {
+      const startIndex = match.index ?? -1;
+      if (startIndex < 0) continue;
+
+      const endIndex = findMatchingTagEnd(html, startIndex, "div");
+      if (endIndex < 0) continue;
+
+      const clusterHtml = html.slice(startIndex, endIndex);
+      const heading = firstMatch(clusterHtml, [
+        /<[^>]*class="[^"]*\bheading\b[^"]*"[^>]*>[\s\S]*?<a[^>]*class="[^"]*\btitle-link\b[^"]*"[^>]*>([\s\S]*?)<\/a>/i,
+        /<div[^>]*class="[^"]*\bheading\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+        /<h[1-6][^>]*class="[^"]*\bheading\b[^"]*"[^>]*>([\s\S]*?)<\/h[1-6]>/i,
+        /<h[1-6][^>]*class="[^"]*\bC7Bf8e\b[^"]*"[^>]*>([\s\S]*?)<\/h[1-6]>/i,
+      ]);
+      const headingHref = firstMatch(clusterHtml, [
+        /<[^>]*class="[^"]*\bheading\b[^"]*"[^>]*>[\s\S]*?<a[^>]*class="[^"]*\btitle-link\b[^"]*"[^>]*href="([^"]+)"/i,
+        /<a[^>]*href="([^"]+)"[^>]*>\s*<h[1-6][^>]*class="[^"]*\bC7Bf8e\b[^"]*"[^>]*>/i,
+        /<a[^>]*class="[^"]*\bsee-more\b[^"]*"[^>]*href="([^"]+)"/i,
+        /<a[^>]*class="[^"]*\bLkLjZd\b[^"]*"[^>]*href="([^"]+)"/i,
+      ]);
+      if (
+        !isSimilarClusterHeading(heading) &&
+        !isSimilarClusterLink(headingHref)
+      ) {
+        continue;
+      }
+
+      for (const packageId of extractOrderedPackageIds(clusterHtml, [
+        ...seen,
+      ])) {
+        if (seen.has(packageId)) continue;
+        seen.add(packageId);
+        ids.push(packageId);
+        if (ids.length >= 3) return ids;
+      }
     }
   }
 
-  return [...ids];
+  return ids;
 }
 
 function extractCategory(html) {
@@ -1545,7 +1687,7 @@ function extractCategory(html) {
   return normalizeCategorySlug(slug, label);
 }
 
-function extractDetailFields(html, detailTimestamp) {
+function extractDetailFields(html, detailTimestamp, currentPackageId = "") {
   const metadata = extractMetadataMap(html);
   const media = extractDetailMedia(html);
   let name = cleanText(
@@ -1703,6 +1845,7 @@ function extractDetailFields(html, detailTimestamp) {
     ratingValue: Number.isFinite(ratingValue) ? ratingValue : undefined,
     reviews,
     ratingCountText: formatCountText(reviews),
+    similarIds: extractSimilarPackageIds(html, currentPackageId),
   };
 }
 
@@ -1758,6 +1901,7 @@ function buildAppRecord(packageId, detail, detailTimestamp) {
   const image = sanitizeMediaUrl(detail.image || detail.icon);
   const trailerImage = sanitizeMediaUrl(detail.trailerImage) || undefined;
   const screenshots = sanitizeMediaList(detail.screenshots);
+  const similarIds = sanitizeRelationIds(detail.similarIds, packageId);
 
   return {
     id: packageId,
@@ -1787,6 +1931,8 @@ function buildAppRecord(packageId, detail, detailTimestamp) {
     ratingValue: detail.ratingValue,
     ratingCountText: detail.ratingCountText,
     reviews: detail.reviews,
+    similarIds,
+    moreFromDeveloperIds: [],
   };
 }
 
@@ -2347,6 +2493,25 @@ function fillMissingMedia(baseDetail, candidateDetail) {
   baseDetail.screenshots = mergedScreenshots;
 }
 
+function mergeDetailRelations(
+  baseDetail,
+  candidateDetail,
+  currentPackageId = "",
+) {
+  const mergedSimilarIds = sanitizeRelationIds(
+    [
+      ...(Array.isArray(baseDetail?.similarIds) ? baseDetail.similarIds : []),
+      ...(Array.isArray(candidateDetail?.similarIds)
+        ? candidateDetail.similarIds
+        : []),
+    ],
+    currentPackageId,
+  );
+  if (mergedSimilarIds.length > 0) {
+    baseDetail.similarIds = mergedSimilarIds;
+  }
+}
+
 function applyLatestMetrics(baseDetail, latestDetail) {
   if (!isBlankText(latestDetail.installs)) {
     baseDetail.installs = latestDetail.installs;
@@ -2413,7 +2578,16 @@ async function collectSourcePackages(year, pageLimit) {
   const summary = [];
 
   for (const sourceUrl of SOURCE_PAGES) {
-    const rows = await fetchCdxRows(sourceUrl, year);
+    let rows;
+    try {
+      rows = await fetchCdxRows(sourceUrl, year);
+    } catch (error) {
+      logArchiveSync(
+        "discover:source:skip",
+        `year=${year} source=${sourceUrl} error=${error?.message ?? String(error)}`,
+      );
+      continue;
+    }
     const scopedRows = pageLimit > 0 ? rows.slice(0, pageLimit) : rows;
     console.log(
       `[discover] source=${sourceUrl} snapshots=${scopedRows.length}/${rows.length}`,
@@ -2512,7 +2686,16 @@ async function collectSourcePackagesStreaming(
   for (const sourceUrl of SOURCE_PAGES) {
     if (shouldStop()) break;
 
-    const rows = await fetchCdxRows(sourceUrl, year);
+    let rows;
+    try {
+      rows = await fetchCdxRows(sourceUrl, year);
+    } catch (error) {
+      logArchiveSync(
+        "discover:source:skip",
+        `year=${year} source=${sourceUrl} error=${error?.message ?? String(error)}`,
+      );
+      continue;
+    }
     const scopedRows = pageLimit > 0 ? rows.slice(0, pageLimit) : rows;
     logArchiveSync(
       "discover:source",
@@ -2770,6 +2953,10 @@ async function persistArchiveFallbackApp(candidate, detailRecord, year) {
     const incomingScreenshots = sanitizeMediaList(
       Array.isArray(incoming.screenshots) ? incoming.screenshots : [],
     );
+    const incomingSimilarIds = sanitizeRelationIds(
+      incoming.similarIds,
+      candidate.packageId,
+    );
 
     if (!isBlankText(incomingName)) setIfChanged("name", incomingName);
     if (!isBlankText(incomingPublisher))
@@ -2822,6 +3009,9 @@ async function persistArchiveFallbackApp(candidate, detailRecord, year) {
     }
     if (incomingScreenshots.length > 0) {
       setIfChanged("screenshots", incomingScreenshots);
+    }
+    if (incomingSimilarIds.length > 0) {
+      setIfChanged("similarIds", incomingSimilarIds);
     }
 
     if (!changed) {
@@ -3227,7 +3417,7 @@ async function fetchDetailRecord(packageId, preferredTimestamp, year) {
     );
     const detailTimestamp = extractWaybackTimestamp(page.finalUrl) || timestamp;
     const notFound = isArchiveNotFoundPage(page.text);
-    const fields = extractDetailFields(page.text, detailTimestamp);
+    const fields = extractDetailFields(page.text, detailTimestamp, packageId);
     const record = {
       timestamp: detailTimestamp,
       pageUrl: page.finalUrl,
@@ -3315,6 +3505,10 @@ async function fetchDetailRecord(packageId, preferredTimestamp, year) {
 
   if (isBlankText(mergedFields.image) && !isBlankText(mergedFields.icon)) {
     mergedFields.image = mergedFields.icon;
+  }
+  for (const record of fieldCache.values()) {
+    if (!record || record.notFound) continue;
+    mergeDetailRelations(mergedFields, record.fields, packageId);
   }
 
   const runMediaValidation = async (order, stage) => {

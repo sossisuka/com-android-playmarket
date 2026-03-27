@@ -1,7 +1,7 @@
 export type PlayCategory = { id: string; label: string };
 
 // AUTO-GENERATED FILE. DO NOT EDIT BY HAND.
-// Generated at: 2026-03-26T03:20:32.831Z
+// Generated at: 2026-03-26T18:09:34.920Z
 
 export const generatedPlayCategories: PlayCategory[] = [
   {
@@ -125,8 +125,16 @@ export const generatedPlayCategories: PlayCategory[] = [
     "label": "House & Home"
   },
   {
+    "id": "LIBRARIES_AND_DEMO",
+    "label": "Libraries & Demo"
+  },
+  {
     "id": "LIFESTYLE",
     "label": "Lifestyle"
+  },
+  {
+    "id": "MAPS_AND_NAVIGATION",
+    "label": "Maps & Navigation"
   },
   {
     "id": "MEDIA_AND_VIDEO",
